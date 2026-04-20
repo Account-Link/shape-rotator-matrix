@@ -1,0 +1,96 @@
+# Shape Rotator Matrix deployment on dstack.
+#
+# Differs from the generic dstack-matrix example by adding:
+#   - dstack-ingress with Namecheap DNS-01 TLS for mtrx.shaperotator.xyz
+#   - landing: nginx serving a branded /  +  /join?code=... invite page
+#   - knock-approver: Python service that auto-approves space knocks
+#                     whose "reason" matches a code in /data/codes.json
+#
+# Deploy:
+#   ./deploy/encode_env.sh            # rebuilds .env from landing/ + knock-approver/
+#   phala deploy --cvm-id dstack-matrix -c docker-compose.yml -e .env
+#
+# All static text files + the approver.py script are base64-encoded into .env
+# so this compose file can be uploaded to dstack without side-channel file mounts.
+services:
+  dstack-ingress:
+    image: dstacktee/dstack-ingress:2.2
+    ports:
+      - "443:443"
+    environment:
+      DOMAIN: mtrx.shaperotator.xyz
+      CERTBOT_EMAIL: socrates1024@gmail.com
+      DNS_PROVIDER: namecheap
+      NAMECHEAP_USERNAME: ${NAMECHEAP_USERNAME}
+      NAMECHEAP_API_KEY: ${NAMECHEAP_API_KEY}
+      GATEWAY_DOMAIN: 12b577ffb80492b08db079a9d0b07391fcc20529-443.dstack-pha-prod9.phala.network
+      TARGET_ENDPOINT: landing:80
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - cert-data:/etc/letsencrypt
+      - evidences:/var/www/html/evidences
+    restart: unless-stopped
+    depends_on:
+      - landing
+
+  landing:
+    image: nginx:alpine
+    environment:
+      INDEX_B64: ${INDEX_B64}
+      JOIN_B64: ${JOIN_B64}
+      NGINX_CONF_B64: ${NGINX_CONF_B64}
+    command: >
+      sh -c '
+      echo "$$INDEX_B64" | base64 -d > /usr/share/nginx/html/index.html &&
+      echo "$$JOIN_B64"  | base64 -d > /usr/share/nginx/html/join.html &&
+      echo "$$NGINX_CONF_B64" | base64 -d > /etc/nginx/conf.d/default.conf &&
+      exec nginx -g "daemon off;"
+      '
+    restart: unless-stopped
+    depends_on:
+      - continuwuity
+
+  continuwuity:
+    image: ghcr.io/continuwuity/continuwuity:latest
+    environment:
+      CONDUWUIT_SERVER_NAME: mtrx.shaperotator.xyz
+      CONDUWUIT_DATABASE_BACKEND: rocksdb
+      CONDUWUIT_DATABASE_PATH: /var/lib/conduwuit
+      CONDUWUIT_ADDRESS: "0.0.0.0"
+      CONDUWUIT_PORT: "6167"
+      CONDUWUIT_ALLOW_REGISTRATION: "true"
+      CONDUWUIT_REGISTRATION_TOKEN: ${REGISTRATION_TOKEN}
+      CONDUWUIT_ALLOW_FEDERATION: "true"
+      CONDUWUIT_NEW_USER_DISPLAYNAME_SUFFIX: ""
+      CONDUWUIT_LOG: info
+      CONDUWUIT_WELL_KNOWN__CLIENT: https://mtrx.shaperotator.xyz
+      CONDUWUIT_WELL_KNOWN__SERVER: "mtrx.shaperotator.xyz:443"
+    volumes:
+      - continuwuity-data:/var/lib/conduwuit
+    restart: unless-stopped
+
+  knock-approver:
+    image: python:3.11-slim
+    environment:
+      HS: https://mtrx.shaperotator.xyz
+      MATRIX_TOKEN: ${KNOCK_APPROVER_TOKEN}
+      SPACE_ID: ${SHAPEROTATOR_SPACE_ID}
+      APPROVER_B64: ${APPROVER_B64}
+      INITIAL_CODES: ${INITIAL_CODES}
+    volumes:
+      - knock-data:/data
+    command: >
+      sh -c '
+      pip install --quiet aiohttp &&
+      echo "$$APPROVER_B64" | base64 -d > /app.py &&
+      exec python -u /app.py
+      '
+    restart: unless-stopped
+    depends_on:
+      - continuwuity
+
+volumes:
+  continuwuity-data:
+  cert-data:
+  evidences:
+  knock-data:

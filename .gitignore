@@ -1,0 +1,6 @@
+.env
+.env~
+*.swp
+__pycache__/
+.claude/
+.DS_Store
