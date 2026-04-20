@@ -44,6 +44,15 @@ LOG_PATH      = Path(os.environ.get("LOG_PATH",          "/data/log.jsonl"))
 SYNC_STATE    = Path(os.environ.get("SYNC_STATE",        "/data/sync_since.txt"))
 HTTP_PORT     = int(os.environ.get("HTTP_PORT", "8001"))
 
+# Comma-separated list of space-child room IDs that a freshly-signed-up user
+# should auto-join via the restricted rule. Typically: general, announcements,
+# bot-noise. IDs MUST be unsuffixed (!foo, not !foo:server.tld).
+SPACE_CHILD_IDS = [r.strip() for r in os.environ.get("SPACE_CHILD_IDS", "").split(",") if r.strip()]
+
+# Default inviter MXID to DM from the new account when someone signs up.
+# Per-code override: set "inviter" on the signup_codes.json entry.
+ONBOARDING_INVITER_MXID = os.environ.get("ONBOARDING_INVITER_MXID", "").strip()
+
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
@@ -159,6 +168,26 @@ def valid_username(u: str) -> bool:
     return (u.isascii() and 1 <= len(u) <= 32
             and all(c.isalnum() or c in "-_.=" for c in u))
 
+async def _admin_invite(mxid, room_id, reason="signup auto-invite"):
+    """Invite `mxid` to `room_id` using the admin (MATRIX_TOKEN) account."""
+    async with aiohttp.ClientSession(
+        headers={**AUTH, "Content-Type": "application/json"}
+    ) as s:
+        url = f"{HS}/_matrix/client/v3/rooms/{room_id}/invite"
+        async with s.post(url, json={"user_id": mxid, "reason": reason}) as r:
+            return r.status, await r.text()
+
+async def _as_user(access_token, method, path, body=None):
+    """Make a request as the freshly-registered user."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    url = f"{HS}{path}"
+    async with aiohttp.ClientSession(headers=headers) as s:
+        kwargs = {"json": body} if body is not None else {}
+        async with s.request(method, url, **kwargs) as r:
+            return r.status, await r.text()
+
 async def signup_handler(request):
     if not REG_TOKEN:
         return web.json_response({"error": "signup_disabled"}, status=503)
@@ -167,9 +196,11 @@ async def signup_handler(request):
     except Exception:
         return web.json_response({"error": "bad_json"}, status=400)
 
-    code     = (data.get("code") or "").strip()
-    username = (data.get("username") or "").strip().lower()
-    password = data.get("password") or ""
+    code        = (data.get("code") or "").strip()
+    username    = (data.get("username") or "").strip().lower()
+    password    = data.get("password") or ""
+    displayname = (data.get("display_name") or "").strip()
+    intro_raw   = (data.get("intro") or "").strip()
 
     if not (code and username and password):
         return web.json_response({"error": "missing_fields"}, status=400)
@@ -184,8 +215,8 @@ async def signup_handler(request):
         audit({"type": "signup_rejected", "username": username, "why": "invalid_code"})
         return web.json_response({"error": "invalid_code"}, status=403)
 
+    # --- Step 1+2: register ---
     async with aiohttp.ClientSession() as s:
-        # Step 1: get a fresh UIA session
         async with s.post(f"{HS}/_matrix/client/v3/register", json={}) as r:
             if r.status == 401:
                 session = (await r.json()).get("session")
@@ -193,7 +224,6 @@ async def signup_handler(request):
                 return web.json_response({"error": "register_init_unexpected",
                                           "status": r.status}, status=502)
 
-        # Step 2: complete with server-side reg token
         body = {
             "auth": {"type": "m.login.registration_token",
                      "token": REG_TOKEN, "session": session},
@@ -210,36 +240,94 @@ async def signup_handler(request):
                 return web.json_response({"error": err,
                                           "detail": result.get("error")}, status=400)
 
-    # Decrement code (only on success)
     entry["uses_remaining"] -= 1
     codes[code] = entry
     _save(SIGNUP_PATH, codes)
 
-    # Auto-invite to the space (best effort)
-    mxid = result["user_id"]
-    try:
-        async with aiohttp.ClientSession(
-            headers={**AUTH, "Content-Type": "application/json"}
-        ) as s:
-            invite_url = f"{HS}/_matrix/client/v3/rooms/{SPACE_ID}/invite"
-            async with s.post(invite_url,
-                              json={"user_id": mxid, "reason": "signup auto-invite"}) as r:
-                if r.status != 200:
-                    print(f"[signup] invite of {mxid} failed: {r.status} "
-                          f"{(await r.text())[:200]}", flush=True)
-    except Exception as e:
-        print(f"[signup] invite error: {e}", flush=True)
+    mxid  = result["user_id"]
+    token = result["access_token"]
+    steps_done = {"register": True}
+
+    # --- Step 3: admin invites the new user to the space ---
+    st, _body = await _admin_invite(mxid, SPACE_ID)
+    steps_done["space_invited"] = (st == 200)
+    if st != 200:
+        print(f"[signup] admin invite of {mxid} -> {st}: {_body[:200]}", flush=True)
+
+    # --- Step 4: new user sets display name (if requested) ---
+    if displayname:
+        import urllib.parse as _up
+        st, _body = await _as_user(
+            token, "PUT",
+            f"/_matrix/client/v3/profile/{_up.quote(mxid)}/displayname",
+            {"displayname": displayname[:100]},
+        )
+        steps_done["displayname_set"] = (st == 200)
+
+    # --- Step 5: new user accepts space invite ---
+    st, _body = await _as_user(
+        token, "POST", f"/_matrix/client/v3/rooms/{SPACE_ID}/join", {}
+    )
+    steps_done["space_joined"] = (st == 200)
+    if st != 200:
+        print(f"[signup] space join by {mxid} -> {st}: {_body[:200]}", flush=True)
+
+    # --- Step 6: new user joins each child room (restricted rule permits) ---
+    joined_children = []
+    for child in SPACE_CHILD_IDS:
+        st, _body = await _as_user(
+            token, "POST", f"/_matrix/client/v3/rooms/{child}/join", {}
+        )
+        if st == 200:
+            joined_children.append(child)
+        else:
+            print(f"[signup] child {child} join by {mxid} -> {st}: {_body[:200]}", flush=True)
+    steps_done["children_joined"] = joined_children
+
+    # --- Step 7: DM the inviter from the new user ---
+    inviter = (entry.get("inviter") or ONBOARDING_INVITER_MXID or "").strip()
+    dm_room = None
+    if inviter:
+        st, dm_body = await _as_user(
+            token, "POST", "/_matrix/client/v3/createRoom",
+            {
+                "is_direct": True,
+                "invite":    [inviter],
+                "preset":    "trusted_private_chat",
+                "name":      f"{displayname or username} ↔ {inviter}",
+            },
+        )
+        if st == 200:
+            dm_room = json.loads(dm_body).get("room_id")
+            intro_msg = intro_raw or (
+                f"hi — I'm {displayname or mxid}, just signed up on "
+                f"{HS_PUBLIC} via a code you issued. Let me know if you need me to do anything."
+            )
+            import uuid
+            txn = uuid.uuid4().hex
+            st2, _ = await _as_user(
+                token, "PUT",
+                f"/_matrix/client/v3/rooms/{dm_room}/send/m.room.message/{txn}",
+                {"msgtype": "m.text", "body": intro_msg},
+            )
+            steps_done["inviter_dm"] = (st2 == 200)
+        else:
+            print(f"[signup] createRoom (DM to {inviter}) -> {st}: {dm_body[:200]}", flush=True)
+            steps_done["inviter_dm"] = False
 
     audit({"type": "signup_ok", "user": mxid, "code": code,
-           "uses_left": entry["uses_remaining"]})
-    print(f"[signup ok] {mxid} via {code} (left={entry['uses_remaining']})", flush=True)
+           "uses_left": entry["uses_remaining"], "steps": steps_done})
+    print(f"[signup ok] {mxid} via {code} "
+          f"(left={entry['uses_remaining']}, steps={steps_done})", flush=True)
 
     return web.json_response({
-        "user_id": mxid,
-        "access_token": result["access_token"],
-        "device_id": result["device_id"],
-        "homeserver": HS_PUBLIC,
-        "space_id": SPACE_ID,
+        "user_id":     mxid,
+        "access_token": token,
+        "device_id":   result["device_id"],
+        "homeserver":  HS_PUBLIC,
+        "space_id":    SPACE_ID,
+        "steps":       steps_done,
+        "dm_room":     dm_room,
     })
 
 async def run_http():

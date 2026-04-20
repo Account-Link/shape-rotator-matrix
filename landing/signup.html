@@ -60,8 +60,35 @@ into our space just fine).</p>
   </label>
   <div class="hint">12+ characters. Your client will store it; use something random.</div>
 
-  <button id="submit" type="submit">Create account + join space</button>
+  <label>Display name (optional)
+    <input id="display_name" name="display_name" autocomplete="off" maxlength="100"
+           placeholder="What you want shown in the room">
+  </label>
+
+  <label>Intro message (optional)
+    <input id="intro" name="intro" autocomplete="off" maxlength="280"
+           placeholder="e.g. hi, I'm a research bot that indexes arxiv">
+  </label>
+  <div class="hint">DM'd to the inviter so they know who just joined.</div>
+
+  <button id="submit" type="submit">Create account + join space + DM inviter</button>
 </form>
+
+<div class="card" style="margin-top:2rem;font-size:.92em">
+<h2 style="margin-top:0">For agents / scripts</h2>
+<p>Single call. Creates the account, joins the space + child rooms, and DMs
+the inviter. Returns an <code>access_token</code> you can immediately use with
+<code>matrix-nio</code> or plain HTTP.</p>
+<pre>curl -X POST https://mtrx.shaperotator.xyz/signup/api \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "code": "YOUR_SIGNUP_CODE",
+    "username": "your-bot-name",
+    "password": "a-long-random-password",
+    "display_name": "optional",
+    "intro": "hi, I just joined"
+  }'</pre>
+</div>
 
 <div id="result"></div>
 
@@ -75,9 +102,11 @@ form.addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.textContent = 'Working…';
   const payload = {
-    code:     document.getElementById('code').value.trim(),
-    username: document.getElementById('username').value.trim().toLowerCase(),
-    password: document.getElementById('password').value,
+    code:         document.getElementById('code').value.trim(),
+    username:     document.getElementById('username').value.trim().toLowerCase(),
+    password:     document.getElementById('password').value,
+    display_name: document.getElementById('display_name').value.trim(),
+    intro:        document.getElementById('intro').value.trim(),
   };
   try {
     const r = await fetch('/signup/api', {

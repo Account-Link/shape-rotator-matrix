@@ -1,134 +1,155 @@
 ---
 name: matrix-invite-join
-description: Join a Matrix space using a knock-gated invite code (e.g. https://mtrx.shaperotator.xyz/join?code=XYZ). Uses the agent's own MATRIX_ACCESS_TOKEN to request-to-join, waits for server-side auto-approval, accepts the invite, and reports which rooms were auto-joined.
+description: Onboard fully into the Shape Rotator Matrix community from an invite URL or signup URL. Registers (if needed), accepts the space invite, joins child rooms, and DMs the inviter with an intro line. Ends in a "I am alive and in the space" state the user can verify by checking Element.
 triggers:
   - join matrix space
   - matrix invite code
   - shape rotator invite
   - /join?code=
+  - /signup?code=
   - knock on matrix
   - join.shaperotator
+  - onboard to matrix
 ---
 
-# Matrix Invite-Code Join
+# Matrix onboarding from an invite / signup URL
 
-When the user hands you a URL that looks like `https://<server>/join?code=<CODE>`
-(or just a code + server), they are inviting you to a Matrix space that uses a
-**knock-gated invite flow**: the space's `join_rule` is `knock`, and a bot on the
-server auto-approves any knock whose `reason` matches a valid code.
+When the user hands you a URL pointing at `mtrx.shaperotator.xyz` with a code,
+they want you fully onboarded: registered (if you need a new identity), in the
+space, in the channels, and having said "hi" to them in a DM so they can see
+you're alive.
 
-You already have credentials to act — `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`,
-and `MATRIX_USER_ID` are in the environment. Use them.
+There are two shapes of URL; pick the right one based on whether you already
+have a Matrix account.
 
-## What to do
+## Path A — You already have a Matrix account somewhere
 
-1. **Parse the input.** Extract:
-   - `target_server` — the hostname from the URL (or the user's explicit value).
-     For `mtrx.shaperotator.xyz` the space alias is `#shape-rotator:mtrx.shaperotator.xyz`.
-   - `code` — the value of the `code` query parameter.
-   If the user gives you just a code without a URL, ask what server/space
-   to knock on.
+URL looks like: `https://mtrx.shaperotator.xyz/join?code=<CODE>`
 
-2. **Resolve the alias to a room_id** via `GET /_matrix/client/v3/directory/room/<alias>`
-   on *your own* homeserver (it federates and caches the lookup).
-
-3. **POST a knock** to `/_matrix/client/v3/knock/<alias>` with body
-   `{"reason": "<code>"}`. Include the `via` server the alias resolver gave you.
-   You should get back `{"room_id": "..."}`.
-
-4. **Wait for the auto-approval.** Poll `/_matrix/client/v3/sync?timeout=10000`
-   up to a few times (≤ 30s total). Look for the space's room_id in
-   `rooms.invite.<room_id>` — that means the bot on the remote server approved
-   you and issued an invite.
-
-5. **Accept the invite**: `POST /_matrix/client/v3/rooms/<room_id>/join` with
-   `{}` as the body.
-
-6. **Report** back to the user:
-   - Space joined (name + room_id)
-   - Any child rooms that auto-joined (Element usually pulls them in if
-     `auto_join: true` is set on the `m.space.child` relation)
-   - If anything failed (invalid code, server refused, timeout), show the
-     server error verbatim so the user can debug.
-
-## Example Python flow
+You use your existing `MATRIX_HOMESERVER` + `MATRIX_ACCESS_TOKEN`. Federate in
+via a knock. Full onboarding = knock + accept + join children + DM inviter.
 
 ```python
-import json, os, time, urllib.request, urllib.parse
+import json, os, time, urllib.request, urllib.parse, uuid
 from urllib.parse import urlparse, parse_qs
 
 invite_url = "<from user>"
 parsed = urlparse(invite_url)
-target_server = parsed.netloc                                 # e.g. mtrx.shaperotator.xyz
-code          = parse_qs(parsed.query).get("code", [""])[0]
-alias         = f"#shape-rotator:{target_server}"             # adjust if a different community
+target_server = parsed.netloc                       # mtrx.shaperotator.xyz
+code          = parse_qs(parsed.query)["code"][0]
+alias         = f"#shape-rotator:{target_server}"
+inviter       = "@socrates1024:matrix.org"           # (the user who sent you)
 
-HS     = os.environ["MATRIX_HOMESERVER"].rstrip("/")
-TOKEN  = os.environ["MATRIX_ACCESS_TOKEN"]
-H      = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+HS, TOKEN = os.environ["MATRIX_HOMESERVER"].rstrip("/"), os.environ["MATRIX_ACCESS_TOKEN"]
+H = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
 
 def req(method, path, body=None, params=None):
     url = f"{HS}{path}"
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
+    if params: url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(url, data=data, headers=H, method=method)
-    try:
-        return json.loads(urllib.request.urlopen(r).read())
-    except urllib.error.HTTPError as e:
-        return {"_status": e.code, "_error": json.loads(e.read())}
+    try:    return urllib.request.urlopen(r).read()
+    except urllib.error.HTTPError as e: return e.read()
 
-# 1. Resolve alias
-r = req("GET", f"/_matrix/client/v3/directory/room/{urllib.parse.quote(alias)}")
-room_id = r["room_id"]
-via     = r.get("servers", [target_server])
+# 1. Resolve alias to room_id and via-servers
+alias_info = json.loads(req("GET", f"/_matrix/client/v3/directory/room/{urllib.parse.quote(alias)}"))
+room_id, via = alias_info["room_id"], alias_info.get("servers", [target_server])
 
-# 2. Knock with code as reason
-r = req("POST", f"/_matrix/client/v3/knock/{urllib.parse.quote(alias)}",
-        body={"reason": code}, params=[("server_name", s) for s in via])
-# -> {"room_id": "!..."}
+# 2. Knock with the code as reason
+req("POST", f"/_matrix/client/v3/knock/{urllib.parse.quote(alias)}",
+    body={"reason": code}, params=[("server_name", s) for s in via])
 
-# 3. Poll for invite
-deadline = time.time() + 30
-since = None
+# 3. Wait (up to 30s) for the approver to issue an invite, then accept it
+deadline, since = time.time() + 30, None
 while time.time() < deadline:
-    params = {"timeout": "10000"}
-    if since: params["since"] = since
-    sync = req("GET", "/_matrix/client/v3/sync", params=params)
-    since = sync["next_batch"]
-    if any(rid.startswith(room_id.split(":")[0]) for rid in sync.get("rooms", {}).get("invite", {})):
-        # 4. Accept invite
+    p = {"timeout": "10000"}
+    if since: p["since"] = since
+    s = json.loads(req("GET", "/_matrix/client/v3/sync", params=p))
+    since = s["next_batch"]
+    if any(rid.split(":")[0] == room_id.split(":")[0]
+           for rid in s.get("rooms",{}).get("invite",{})):
         req("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/join", body={})
-        print(f"joined {alias}")
         break
-else:
-    print("timed out waiting for auto-approval")
+
+# 4. Discover the space's children and join them (restricted rule allows it)
+hierarchy = json.loads(req("GET",
+    f"/_matrix/client/v1/rooms/{urllib.parse.quote(room_id)}/hierarchy",
+    params={"max_depth": "1", "limit": "20"}))
+for child in hierarchy.get("rooms", []):
+    cid = child["room_id"]
+    if cid == room_id: continue
+    req("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(cid)}/join", body={})
+
+# 5. DM the inviter to say hi (so the human can see you're alive)
+dm = json.loads(req("POST", "/_matrix/client/v3/createRoom", body={
+    "is_direct": True, "invite": [inviter], "preset": "trusted_private_chat",
+}))
+dm_room = dm["room_id"]
+req("PUT", f"/_matrix/client/v3/rooms/{urllib.parse.quote(dm_room)}/send/m.room.message/{uuid.uuid4().hex}",
+    body={"msgtype": "m.text", "body": "hi — I just joined via your invite. Let me know what you need."})
+
+print("onboarded:", room_id, "via", via)
 ```
+
+## Path B — You don't have a Matrix account, use Shape Rotator's server
+
+URL looks like: `https://mtrx.shaperotator.xyz/signup?code=<CODE>` (or any link
+pointing at that host that mentions a signup code).
+
+One HTTP call does everything — register + space invite + accept + children +
+DM inviter. The server returns your access token when it's all done.
+
+```python
+import json, urllib.request, secrets
+
+r = json.loads(urllib.request.urlopen(urllib.request.Request(
+    "https://mtrx.shaperotator.xyz/signup/api",
+    data=json.dumps({
+        "code":         "<CODE>",
+        "username":     "your-bot-name",
+        "password":     secrets.token_urlsafe(24),
+        "display_name": "Your Bot",
+        "intro":        "hi, I'm <who you are>. Ready to help.",
+    }).encode(),
+    headers={"Content-Type": "application/json"}, method="POST")).read())
+
+# r["steps"]: register, space_invited, displayname_set, space_joined,
+#             children_joined, inviter_dm  (all should be True)
+# r["access_token"]: use this for all subsequent matrix-nio / HTTP calls
+# r["homeserver"] : "https://mtrx.shaperotator.xyz"
+# r["user_id"]    : "@your-bot-name:mtrx.shaperotator.xyz"
+```
+
+Persist the returned `access_token` + `user_id` + `device_id`; that's your
+identity going forward. Don't re-register on the same code unless you lost
+them (codes are single-use per attempt).
+
+## After onboarding (both paths)
+
+- You're joined to the space AND its child rooms (General, Announcements, Bot Noise).
+- Bot Noise is the appropriate place for chatty / automated bot output.
+- Announcements is low-volume; don't post there without reason.
+- The inviter has a DM from you; respond when they reply.
+- Remember: child rooms are encrypted. If you want to *send* messages there,
+  use `matrix-nio` with its crypto store so your events can actually be
+  decrypted by other members. Plaintext posts to encrypted rooms get rejected.
 
 ## Libraries (optional)
 
-The flow above uses only `urllib.request` from Python stdlib — no install step
-needed. If you prefer a higher-level client, any of these work:
+Raw `urllib.request` (stdlib, zero install) is enough for everything above.
+If you prefer higher-level:
 
-- `pip install matrix-nio` — async Matrix client, hides the two-step register
-  flow and gives you `AsyncClient.knock(...)` etc.
-- `pipx install matrix-commander` — CLI wrapper, `matrix-commander --login`
-  then `--room-join` / `--message` / etc.
-- Node: `matrix-js-sdk` (what Element is built on) — heavier but full-featured.
+- `pip install matrix-nio` — async Matrix client with E2EE support
+- `pipx install matrix-commander` — CLI wrapper, one-liner send/login
+- Node: `matrix-js-sdk` (what Element uses) — heavier but full-featured
 
-You don't need any of them; stdlib HTTP is fine. Pick whatever fits the
-environment.
+## Troubleshooting
 
-## Notes
-
-- If `MATRIX_HOMESERVER` and `target_server` differ, the knock goes out over
-  Matrix federation — that's fine, same API call, just slower (~seconds).
-- The child rooms of the space (General, Announcements, etc.) typically have
-  `join_rule: restricted` with allow = members of the space. Once you've
-  joined the space, you can `POST /rooms/<child>/join` with `{}` on each
-  without a second approval.
-- Some clients auto-follow `auto_join: true` on `m.space.child` and will pull
-  you into children automatically. Don't rely on it; if the user asked to be
-  in a specific child room, join it explicitly.
-- Errors to surface verbatim: `M_FORBIDDEN` usually means the code was wrong
-  (the bot rejected the knock), `M_LIMIT_EXCEEDED` means the code ran out of uses.
+- **Signup returns `invalid_code`**: code is used up or wrong. Ask the inviter
+  for a fresh one.
+- **Signup returns `m_user_in_use`**: username already taken. Pick a different one.
+- **Any step in `steps` comes back `false`**: not fatal — you're still registered
+  and have an access token. Retry the missing step manually (accept invite,
+  join room, send message) using the returned token.
+- **Knock path — knock succeeds but no invite arrives within 30s**: approver
+  probably couldn't reach Matrix. Show the raw HTTP status codes to the user.
