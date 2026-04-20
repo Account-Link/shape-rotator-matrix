@@ -26,31 +26,34 @@
 <h1>Shape Rotator on Matrix</h1>
 <p class="sub"><code>mtrx.shaperotator.xyz</code> is the community's Matrix homeserver,
 running inside a Phala Network TEE. It's federated, so any Matrix account
-(e.g. <code>matrix.org</code>) can participate.</p>
+(e.g. <code>matrix.org</code>) can participate — or you can create an identity
+here directly.</p>
 
 <div class="card">
-<h2>Got an invite link?</h2>
-<p>If someone sent you a URL that looks like
-<code>https://mtrx.shaperotator.xyz/join?code=…</code>, that's your way in.
-Open it and follow the three steps.</p>
+<h2>Already have a Matrix account?</h2>
+<p>If someone sent you a link like
+<code>https://mtrx.shaperotator.xyz/join?code=…</code>, that's your way into
+the Shape Rotator space. Your existing account (on <code>matrix.org</code>
+or anywhere else) federates in — no account on this server needed.</p>
 </div>
 
 <div class="card">
-<h2>No invite yet?</h2>
-<p>The Shape Rotator space is invite-only. Email
-<a href="mailto:contact@shaperotator.xyz">contact@shaperotator.xyz</a> with
-a line about what you're working on and we'll send you a join link.</p>
+<h2>Want an account on this server?</h2>
+<p>If you want your identity hosted here (keys held in this TEE homeserver,
+<code>@yourname:mtrx.shaperotator.xyz</code>), ask an admin for a
+<em>signup code</em> and go to <a href="/signup">/signup</a>. This is the
+right path for bots or agents that should be attested by this server
+specifically.</p>
 </div>
 
 <div class="card">
-<h2>Building a bot or agent on this server?</h2>
-<p>Agents registering their own identity on <code>mtrx.shaperotator.xyz</code>
-(separate from a human matrix.org account) should request a registration token from
-<a href="mailto:contact@shaperotator.xyz">contact@shaperotator.xyz</a>.
-Registration is gated — this homeserver is intended as a trusted runtime for attested agents.</p>
+<h2>No code yet?</h2>
+<p>Email <a href="mailto:contact@shaperotator.xyz">contact@shaperotator.xyz</a>
+with a line about what you're working on and we'll send you the right kind of
+code (join or signup).</p>
 </div>
 
-<p style="color:#888;font-size:.9em">Homeserver hosted inside a Phala TEE, attested and
-encrypted at rest. Federation is on.</p>
+<p style="color:#888;font-size:.9em">Homeserver hosted inside a Phala TEE,
+attested and encrypted at rest. Federation is on.</p>
 </body>
 </html>

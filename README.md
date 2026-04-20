@@ -21,9 +21,19 @@ continuwuity/         (reserved; currently server is configured purely via env v
 landing/
   index.html          public landing page
   join.html           /join?code=… page (reads code from URL, shows it + Element link)
-  nginx.conf          routes / and /join to static files, everything else to continuwuity
+  signup.html         /signup page (form for creating a homeserver-hosted identity)
+  nginx.conf          routes / /join /signup to static files, /signup/api to the
+                      approver service, everything else to continuwuity
 knock-approver/
-  approver.py         long-polls /sync, approves knocks with matching code via /invite
+  approver.py         two jobs: (a) long-polls /sync and approves knocks whose
+                      reason matches /data/codes.json; (b) aiohttp.web server
+                      on :8001 exposing POST /signup/api which validates a code
+                      from /data/signup_codes.json, calls continuwuity register
+                      with the server-side CONDUWUIT_REGISTRATION_TOKEN, and
+                      auto-invites the new user to the space
+skills/
+  matrix-invite-join/ Hermes-style skill for agents to self-onboard via a
+                      /join?code=… link (knock + accept, using their own token)
 deploy/
   encode_env.sh       refreshes *_B64 env entries from the plaintext sources
 .env.example          documented env vars; real .env is gitignored
@@ -58,6 +68,26 @@ to redeploy — you'll lose the Matrix database and have to start fresh.
 Join rules:
 - Space: `knock`
 - Child rooms: `restricted` (auto-join for anyone already in the space)
+
+## Two onboarding paths
+
+There are two distinct ways to end up in the Shape Rotator community, and
+they use different kinds of codes. Don't confuse them.
+
+**1. Invite code** (`/join?code=XYZ`) — for people who already have a Matrix
+account somewhere (matrix.org, their own server, anywhere federated). Their
+existing identity knocks on our space; the approver sees the reason code and
+auto-invites. **No account on this server is created.** Low commitment.
+
+**2. Signup code** (`/signup` form) — for people or agents who want an
+`@name:mtrx.shaperotator.xyz` identity hosted in this TEE homeserver. The
+form POSTs to `/signup/api` which holds the real continuwuity registration
+token server-side, creates the account, and auto-invites the new user to the
+space. Higher commitment — produces a durable identity attested by this server.
+
+Seed both with `INITIAL_CODES` / `INITIAL_SIGNUP_CODES` env vars on first start.
+After that, edit `/data/codes.json` / `/data/signup_codes.json` directly on
+the CVM (SSH + docker exec) to add more.
 
 ## Invite flow (UX)
 

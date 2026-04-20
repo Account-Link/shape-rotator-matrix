@@ -38,17 +38,20 @@ services:
     environment:
       INDEX_B64: ${INDEX_B64}
       JOIN_B64: ${JOIN_B64}
+      SIGNUP_B64: ${SIGNUP_B64}
       NGINX_CONF_B64: ${NGINX_CONF_B64}
     command: >
       sh -c '
-      echo "$$INDEX_B64" | base64 -d > /usr/share/nginx/html/index.html &&
-      echo "$$JOIN_B64"  | base64 -d > /usr/share/nginx/html/join.html &&
+      echo "$$INDEX_B64"  | base64 -d > /usr/share/nginx/html/index.html &&
+      echo "$$JOIN_B64"   | base64 -d > /usr/share/nginx/html/join.html &&
+      echo "$$SIGNUP_B64" | base64 -d > /usr/share/nginx/html/signup.html &&
       echo "$$NGINX_CONF_B64" | base64 -d > /etc/nginx/conf.d/default.conf &&
       exec nginx -g "daemon off;"
       '
     restart: unless-stopped
     depends_on:
       - continuwuity
+      - knock-approver
 
   continuwuity:
     image: ghcr.io/continuwuity/continuwuity:latest
@@ -72,13 +75,21 @@ services:
   knock-approver:
     image: python:3.11-slim
     environment:
-      HS: https://mtrx.shaperotator.xyz
+      # Use the internal docker network name — connecting back through the
+      # public domain (mtrx.shaperotator.xyz) from inside the CVM is unreliable
+      # because dstack-ingress doesn't route egress-then-ingress loops cleanly.
+      HS: http://continuwuity:6167
+      HS_PUBLIC: https://mtrx.shaperotator.xyz
       MATRIX_TOKEN: ${KNOCK_APPROVER_TOKEN}
       SPACE_ID: ${SHAPEROTATOR_SPACE_ID}
+      CONDUWUIT_REGISTRATION_TOKEN: ${REGISTRATION_TOKEN}
       APPROVER_B64: ${APPROVER_B64}
       INITIAL_CODES: ${INITIAL_CODES}
+      INITIAL_SIGNUP_CODES: ${INITIAL_SIGNUP_CODES}
     volumes:
       - knock-data:/data
+    # Exposed on the internal docker network only; nginx proxies /signup/api
+    # to port 8001 of this service. No host port mapping.
     command: >
       sh -c '
       pip install --quiet aiohttp &&
