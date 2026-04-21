@@ -26,10 +26,12 @@ State files on the knock-data volume:
   /data/log.jsonl           audit log
   /data/sync_since.txt      /sync cursor
 """
-import asyncio, json, os, sys, time
+import asyncio, base64, json, os, sys, time
 from pathlib import Path
 import aiohttp
 from aiohttp import web
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 HS            = os.environ["HS"].rstrip("/")
 # Public-facing URL returned to signup clients (the client needs to point Element
@@ -335,10 +337,196 @@ async def signup_handler(request):
         "intro_text":  intro_text,   # for the bot to post via nio on startup
     })
 
+# --- Cross-signing bootstrap ---
+#
+# Generate MSK / SSK / USK for the user, sign SSK and USK with MSK, sign the
+# caller's current device with SSK, and upload everything via UIA. After this,
+# Element stops showing "encrypted by a device not verified by its owner".
+#
+# Matrix canonical JSON: keys sorted, no whitespace, no non-ASCII escaping.
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).rstrip(b"=").decode()
+
+def _canon(obj) -> bytes:
+    return json.dumps(obj, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+def _raw_pub(privkey: ed25519.Ed25519PrivateKey) -> bytes:
+    return privkey.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+def _raw_priv(privkey: ed25519.Ed25519PrivateKey) -> bytes:
+    return privkey.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+def _sign_object(obj: dict, signer: ed25519.Ed25519PrivateKey, user_id: str, key_id: str) -> dict:
+    """Sign `obj` per Matrix spec: canonical JSON of obj minus signatures/unsigned,
+    attach under signatures[user_id][ed25519:key_id]."""
+    to_sign = {k: v for k, v in obj.items() if k not in ("signatures", "unsigned")}
+    sig = _b64(signer.sign(_canon(to_sign)))
+    sigs = dict(obj.get("signatures", {}))
+    user_sigs = dict(sigs.get(user_id, {}))
+    user_sigs[f"ed25519:{key_id}"] = sig
+    sigs[user_id] = user_sigs
+    obj["signatures"] = sigs
+    return obj
+
+async def _crosssign(access_token: str, password: str = ""):
+    """Bootstrap cross-signing for the user identified by access_token.
+
+    Password is optional — only needed if the homeserver insists on UIA
+    m.login.password for /keys/device_signing/upload. Continuwuity (our
+    target) currently accepts the upload directly.
+    """
+    headers = {"Authorization": f"Bearer {access_token}",
+               "Content-Type": "application/json"}
+
+    async with aiohttp.ClientSession() as s:
+        # Identify the user
+        async with s.get(f"{HS}/_matrix/client/v3/account/whoami", headers=headers) as r:
+            if r.status != 200:
+                raise RuntimeError(f"whoami failed: {r.status}")
+            me = await r.json()
+        user_id  = me["user_id"]
+        device_id = me["device_id"]
+
+        # Generate three ed25519 keypairs
+        msk = ed25519.Ed25519PrivateKey.generate()
+        ssk = ed25519.Ed25519PrivateKey.generate()
+        usk = ed25519.Ed25519PrivateKey.generate()
+        msk_pub = _b64(_raw_pub(msk))
+        ssk_pub = _b64(_raw_pub(ssk))
+        usk_pub = _b64(_raw_pub(usk))
+
+        # Build three signed key objects.
+        # MSK self-signs (master signs itself). SSK and USK are signed by MSK.
+        master = {
+            "user_id": user_id, "usage": ["master"],
+            "keys": {f"ed25519:{msk_pub}": msk_pub},
+        }
+        master = _sign_object(master, msk, user_id, msk_pub)
+
+        self_signing = {
+            "user_id": user_id, "usage": ["self_signing"],
+            "keys": {f"ed25519:{ssk_pub}": ssk_pub},
+        }
+        self_signing = _sign_object(self_signing, msk, user_id, msk_pub)
+
+        user_signing = {
+            "user_id": user_id, "usage": ["user_signing"],
+            "keys": {f"ed25519:{usk_pub}": usk_pub},
+        }
+        user_signing = _sign_object(user_signing, msk, user_id, msk_pub)
+
+        # Upload the three signing keys. Matrix spec requires UIA here, but
+        # continuwuity sometimes skips it — try direct first, fall back to UIA.
+        upload_body = {
+            "master_key":       master,
+            "self_signing_key": self_signing,
+            "user_signing_key": user_signing,
+        }
+        async with s.post(f"{HS}/_matrix/client/v3/keys/device_signing/upload",
+                          json=upload_body, headers=headers) as r:
+            if r.status == 401:
+                if not password:
+                    raise RuntimeError("homeserver requires UIA; pass `password` to /crosssign")
+                uia = await r.json()
+                session = uia.get("session")
+                if not session:
+                    raise RuntimeError(f"no UIA session: {uia}")
+                upload_body["auth"] = {
+                    "type": "m.login.password",
+                    "identifier": {"type": "m.id.user", "user": user_id},
+                    "password": password,
+                    "session": session,
+                }
+                async with s.post(f"{HS}/_matrix/client/v3/keys/device_signing/upload",
+                                  json=upload_body, headers=headers) as r2:
+                    if r2.status != 200:
+                        raise RuntimeError(f"device_signing/upload (UIA retry) failed "
+                                           f"{r2.status}: {(await r2.text())[:300]}")
+            elif r.status != 200:
+                raise RuntimeError(f"device_signing/upload failed {r.status}: "
+                                   f"{(await r.text())[:300]}")
+
+        # Try to sign the current device with SSK. If device keys aren't uploaded
+        # yet (bot hasn't synced), retry briefly — else succeed partial and let
+        # the caller try again once the bot is live.
+        device_obj = None
+        for attempt in range(4):
+            async with s.post(f"{HS}/_matrix/client/v3/keys/query",
+                              json={"device_keys": {user_id: [device_id]}},
+                              headers=headers) as r:
+                if r.status == 200:
+                    q = await r.json()
+                    device_obj = (q.get("device_keys", {})
+                                   .get(user_id, {})
+                                   .get(device_id))
+                    if device_obj:
+                        break
+            await asyncio.sleep(1.5)
+
+        device_signed = False
+        if device_obj:
+            signed_device = _sign_object(device_obj, ssk, user_id, ssk_pub)
+            async with s.post(f"{HS}/_matrix/client/v3/keys/signatures/upload",
+                              json={user_id: {device_id: signed_device}},
+                              headers=headers) as r:
+                body = await r.json()
+                if r.status == 200 and not body.get("failures"):
+                    device_signed = True
+                else:
+                    print(f"[crosssign] signatures/upload: {r.status} {body}", flush=True)
+
+    return {
+        "device_signed": device_signed,
+        "user_id": user_id,
+        "device_id": device_id,
+        "msk_public": msk_pub,
+        "ssk_public": ssk_pub,
+        "usk_public": usk_pub,
+        "private_keys": {
+            # Client persists these if it wants to sign future devices or
+            # publish its own USK signatures for other users.
+            "master":       _b64(_raw_priv(msk)),
+            "self_signing": _b64(_raw_priv(ssk)),
+            "user_signing": _b64(_raw_priv(usk)),
+        },
+    }
+
+async def crosssign_handler(request):
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    access_token = (data.get("access_token") or "").strip()
+    password     = data.get("password") or ""
+    if not access_token:
+        return web.json_response({"error": "missing_fields",
+                                  "hint": "need access_token; password optional"}, status=400)
+    try:
+        result = await _crosssign(access_token, password)
+    except Exception as e:
+        audit({"type": "crosssign_failed", "error": str(e)})
+        print(f"[crosssign] {e}", flush=True)
+        return web.json_response({"error": "crosssign_failed",
+                                  "detail": str(e)[:500]}, status=400)
+    audit({"type": "crosssign_ok", "user": result["user_id"],
+           "msk": result["msk_public"]})
+    print(f"[crosssign ok] {result['user_id']} msk={result['msk_public'][:20]}...", flush=True)
+    return web.json_response(result)
+
+
 async def run_http():
     app = web.Application()
-    app.router.add_post("/signup/api", signup_handler)
-    app.router.add_get("/health",      lambda r: web.Response(text="ok"))
+    app.router.add_post("/signup/api",           signup_handler)
+    app.router.add_post("/signup/api/crosssign", crosssign_handler)
+    app.router.add_get("/health",                lambda r: web.Response(text="ok"))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)

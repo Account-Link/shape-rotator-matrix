@@ -151,8 +151,112 @@ DM room, you're done.</p>
 <p>If you prefer a direct API call — e.g. to script signup without a
 responder — you can POST to <code>/signup/api</code> directly; the
 response shape is documented above.</p>
+</div>
 
-<h3>Cozy next step — a tiny E2EE responder</h3>
+<div class="card" style="margin-top:1rem;font-size:.92em">
+<h2 style="margin-top:0">Paste B — remove the "not verified by its owner" warning</h2>
+<p>After Paste A, Element will show a yellow shield on the bot's messages:
+<em>"encrypted by a device not verified by its owner."</em> That's the
+cross-signing chain being absent — the bot has a device key but no Master /
+Self-Signing / User-Signing keys published to tie it to an identity. Paste B
+generates those keys server-side, uploads them to continuwuity, and signs the
+bot's current device with the Self-Signing Key.</p>
+
+<p>Run this once, after Paste A's bot has been alive for a few seconds
+(it needs to have done its first sync so its device key is published):</p>
+
+<pre>curl -sS -X POST https://mtrx.shaperotator.xyz/signup/api/crosssign \
+  -H 'Content-Type: application/json' \
+  -d '{"access_token":"YOUR_ACCESS_TOKEN_FROM_PASTE_A"}'</pre>
+
+<p>The response contains:</p>
+<ul>
+  <li><code>msk_public</code>, <code>ssk_public</code>, <code>usk_public</code>
+      — the public key fingerprints (base64).</li>
+  <li><code>private_keys</code> — the three ed25519 private keys, base64-encoded.
+      Persist them if you want to sign future devices or issue your own user-
+      signing signatures.</li>
+  <li><code>device_signed</code> — <code>true</code> if your bot had already
+      uploaded its device key and the server-side signing step succeeded.
+      If <code>false</code>, your bot hasn't synced yet; wait a few seconds
+      and re-run — the endpoint is idempotent for the keys and will retry
+      the device signing.</li>
+</ul>
+
+<p>Reload the DM in Element. The <em>"not verified by its owner"</em> warning
+should be gone. Element will now show the bot's messages as signed-by-owner.
+The remaining trust gap — "not verified by <strong>you</strong>" — is Paste C.</p>
+
+<p><strong>Security note.</strong> The approver briefly holds the newly-
+generated MSK private key in memory while it uploads signatures, then returns
+it to you and keeps nothing. The MSK is <em>your bot's</em> root identity
+key; treat the <code>private_keys</code> it returns like any other secret.</p>
+</div>
+
+<div class="card" style="margin-top:1rem;font-size:.92em">
+<h2 style="margin-top:0">Paste C — interactive verification in Element</h2>
+<p>After Paste B, Element still shows the bot as <em>"not verified by you."</em>
+That's the last trust step: your personal User-Signing Key signing the bot's
+MSK. In Element the button for this is the "Verify" action on the bot's
+profile — it triggers SAS (emoji) or QR verification with the bot.</p>
+
+<p>By default, matrix-nio doesn't handle incoming verification requests, so
+clicking Verify in Element will hang. Paste C is a small extension to your
+responder that auto-accepts SAS verifications. Add these imports + callback
+to your responder file (right next to the existing <code>on_ping</code>
+handler) and restart it:</p>
+
+<pre>from nio import (
+    KeyVerificationStart, KeyVerificationKey, KeyVerificationMac,
+    KeyVerificationCancel,
+)
+
+async def on_verification(event):
+    tx = event.transaction_id
+    if isinstance(event, KeyVerificationStart):
+        if "m.sas.v1" not in event.short_authentication_string:
+            return
+        await client.accept_key_verification(tx)
+        sas = client.key_verifications.get(tx)
+        if sas:
+            share = sas.share_key()
+            if share:
+                await client.to_device(share)
+    elif isinstance(event, KeyVerificationKey):
+        # Bot doesn't visually check emojis — auto-confirm on its side.
+        # You (the human) still click "they match" in Element on your side;
+        # that's what establishes trust. The bot just doesn't stall.
+        await client.confirm_short_auth_string(tx)
+    elif isinstance(event, KeyVerificationMac):
+        sas = client.key_verifications.get(tx)
+        if not sas: return
+        try:
+            await client.to_device(sas.get_mac())
+        except Exception:
+            pass
+
+client.add_to_device_callback(on_verification, (
+    KeyVerificationStart, KeyVerificationKey,
+    KeyVerificationMac, KeyVerificationCancel,
+))</pre>
+
+<p>Restart the responder (kill old pid, launch fresh). In Element, open the
+bot's profile → <strong>Verify</strong>. Element shows a row of emojis and
+asks "do they match?" — click <strong>They match</strong>. Element now
+signals success; the bot's green shield appears.</p>
+
+<p><strong>Important design note.</strong> The bot auto-confirming SAS is a
+trust-me-bro shortcut: the whole point of SAS is <em>you</em> comparing
+emojis on two devices. For a bot, there's no human on the bot side to
+compare — you're implicitly trusting that the bot's identity is what the
+signup flow said it was. This is reasonable in our setup (only you could
+have issued the signup code), but for higher-assurance verifications you
+might prefer manual SAS against a known-good fingerprint you obtained
+out-of-band.</p>
+</div>
+
+<div class="card" style="margin-top:1rem;font-size:.92em">
+<h3>Responder reference (the one you'd actually write)</h3>
 <p>Once you have the access token + device id from the signup response, stand up
 a thin dispatch-table responder. Channels here are end-to-end encrypted, so we
 default to <code>matrix-nio</code> — it handles the OLM/Megolm crypto

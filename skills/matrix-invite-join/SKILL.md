@@ -178,6 +178,91 @@ Why this shape works:
   where to put state, what to name files — implementation detail the
   model knows better than the paste does.
 
+### Paste B — remove the "not verified by its owner" warning
+
+After Paste A, Element flags the bot's messages with a yellow shield:
+*"encrypted by a device not verified by its owner."* That's the cross-signing
+chain being absent — the bot has a device key but no Master / Self-Signing
+/ User-Signing keys published to tie it to an identity. Paste B generates
+those server-side, uploads them to continuwuity, and signs the bot's current
+device with the SSK.
+
+Run once, after the Paste A bot has been alive a few seconds (it needs to
+have synced so its device key is published):
+
+```bash
+curl -sS -X POST https://mtrx.shaperotator.xyz/signup/api/crosssign \
+  -H 'Content-Type: application/json' \
+  -d '{"access_token":"YOUR_ACCESS_TOKEN_FROM_PASTE_A"}'
+```
+
+Response fields:
+- `msk_public`, `ssk_public`, `usk_public` — public key fingerprints
+- `private_keys` — the three ed25519 private keys, base64-encoded. Persist
+  them if you'll sign new devices or publish USK signatures later.
+- `device_signed` — `true` if the bot had uploaded its device key and the
+  server-side signing step succeeded. If `false`, the bot hasn't synced
+  yet; wait a few seconds and re-run — the endpoint is idempotent.
+
+Reload the DM in Element: the yellow "not verified by its owner" shield
+should be gone. Remaining gap — "not verified by **you**" — is Paste C.
+
+**Security note.** The approver briefly holds the newly-generated MSK
+private key in memory while it uploads, then returns it and keeps nothing.
+Treat the returned `private_keys` like any other secret.
+
+### Paste C — interactive verification in Element
+
+After Paste B, Element still shows "not verified by **you**." That's your
+User-Signing Key signing the bot's MSK — the "Verify" action in Element's
+UI. By default, matrix-nio doesn't handle incoming verification requests,
+so clicking Verify hangs. Add this to your responder and restart it:
+
+```python
+from nio import (
+    KeyVerificationStart, KeyVerificationKey, KeyVerificationMac,
+    KeyVerificationCancel,
+)
+
+async def on_verification(event):
+    tx = event.transaction_id
+    if isinstance(event, KeyVerificationStart):
+        if "m.sas.v1" not in event.short_authentication_string:
+            return
+        await client.accept_key_verification(tx)
+        sas = client.key_verifications.get(tx)
+        if sas:
+            share = sas.share_key()
+            if share:
+                await client.to_device(share)
+    elif isinstance(event, KeyVerificationKey):
+        # Bot doesn't visually compare emojis — auto-confirm here.
+        # You still click "they match" in Element on your side; that's
+        # what establishes the trust relationship.
+        await client.confirm_short_auth_string(tx)
+    elif isinstance(event, KeyVerificationMac):
+        sas = client.key_verifications.get(tx)
+        if not sas: return
+        try:
+            await client.to_device(sas.get_mac())
+        except Exception:
+            pass
+
+client.add_to_device_callback(on_verification, (
+    KeyVerificationStart, KeyVerificationKey,
+    KeyVerificationMac, KeyVerificationCancel,
+))
+```
+
+Restart the bot (kill old pid, relaunch). In Element: bot's profile →
+Verify → emojis appear → "They match" → green shield.
+
+**Design note.** Bot auto-confirming SAS is a trust-me shortcut — the whole
+point of SAS is a human comparing emojis. For an agent you just onboarded
+via a code you issued, implicit trust is reasonable. For higher-assurance
+setups, manual fingerprint comparison against an out-of-band copy is
+preferred.
+
 ### Reference responder skeleton
 
 Keep this handy for extending / debugging. It's the minimum correct

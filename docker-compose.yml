@@ -94,7 +94,7 @@ services:
     # to port 8001 of this service. No host port mapping.
     command: >
       sh -c '
-      pip install --quiet aiohttp &&
+      pip install --quiet aiohttp cryptography &&
       echo "$$APPROVER_B64" | base64 -d > /app.py &&
       exec python -u /app.py
       '
