@@ -39,14 +39,12 @@ services:
       INDEX_B64: ${INDEX_B64}
       JOIN_B64: ${JOIN_B64}
       SIGNUP_B64: ${SIGNUP_B64}
-      BOOTSTRAP_B64: ${BOOTSTRAP_B64}
       NGINX_CONF_B64: ${NGINX_CONF_B64}
     command: >
       sh -c '
-      echo "$$INDEX_B64"     | base64 -d > /usr/share/nginx/html/index.html &&
-      echo "$$JOIN_B64"      | base64 -d > /usr/share/nginx/html/join.html &&
-      echo "$$SIGNUP_B64"    | base64 -d > /usr/share/nginx/html/signup.html &&
-      echo "$$BOOTSTRAP_B64" | base64 -d > /usr/share/nginx/html/bootstrap.sh &&
+      echo "$$INDEX_B64"  | base64 -d > /usr/share/nginx/html/index.html &&
+      echo "$$JOIN_B64"   | base64 -d > /usr/share/nginx/html/join.html &&
+      echo "$$SIGNUP_B64" | base64 -d > /usr/share/nginx/html/signup.html &&
       echo "$$NGINX_CONF_B64" | base64 -d > /etc/nginx/conf.d/default.conf &&
       exec nginx -g "daemon off;"
       '
