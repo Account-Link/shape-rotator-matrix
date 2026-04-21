@@ -1,5 +1,6 @@
 .env
 .env~
+dev/.dev-state.json
 *.swp
 __pycache__/
 .claude/

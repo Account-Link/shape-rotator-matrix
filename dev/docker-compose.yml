@@ -1,0 +1,35 @@
+# Local dev stack — no dstack-ingress, no TLS, no federation.
+# Just continuwuity on localhost:46167 so you can iterate on approver.py
+# and landing pages without `phala deploy` every time.
+#
+# Usage:
+#   cd dev
+#   docker compose up -d
+#   python3 bootstrap.py             # creates admin, space, children, prints env
+#   eval "$(python3 bootstrap.py)"   # sets HS/MATRIX_TOKEN/SPACE_ID/etc in your shell
+#   python3 ../knock-approver/approver.py   # run the approver directly, locally
+#   # ... or curl http://localhost:46167 to talk to continuwuity
+#
+# Teardown:
+#   docker compose down -v           # -v drops the rocksdb volume for a clean slate
+services:
+  continuwuity:
+    image: ghcr.io/continuwuity/continuwuity:latest
+    ports:
+      - "127.0.0.1:46167:6167"
+    environment:
+      CONDUWUIT_SERVER_NAME: "localhost:46167"
+      CONDUWUIT_DATABASE_BACKEND: rocksdb
+      CONDUWUIT_DATABASE_PATH: /var/lib/conduwuit
+      CONDUWUIT_ADDRESS: "0.0.0.0"
+      CONDUWUIT_PORT: "6167"
+      CONDUWUIT_ALLOW_REGISTRATION: "true"
+      CONDUWUIT_REGISTRATION_TOKEN: "dev-token"
+      CONDUWUIT_ALLOW_FEDERATION: "false"
+      CONDUWUIT_LOG: info
+    volumes:
+      - continuwuity-dev-data:/var/lib/conduwuit
+    restart: unless-stopped
+
+volumes:
+  continuwuity-dev-data:
