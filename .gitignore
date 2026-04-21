@@ -1,6 +1,7 @@
 .env
 .env~
 dev/.dev-state.json
+deploy/deploy_key
 *.swp
 __pycache__/
 .claude/
