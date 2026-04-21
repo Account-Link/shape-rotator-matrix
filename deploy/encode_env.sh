@@ -18,6 +18,7 @@ fi
 INDEX_B64=$(base64 -w0 landing/index.html)
 JOIN_B64=$(base64 -w0 landing/join.html)
 SIGNUP_B64=$(base64 -w0 landing/signup.html)
+BOOTSTRAP_B64=$(base64 -w0 landing/bootstrap.sh)
 NGINX_CONF_B64=$(base64 -w0 landing/nginx.conf)
 APPROVER_B64=$(base64 -w0 knock-approver/approver.py)
 
@@ -28,6 +29,7 @@ updates = {
     "INDEX_B64":      """$INDEX_B64""",
     "JOIN_B64":       """$JOIN_B64""",
     "SIGNUP_B64":     """$SIGNUP_B64""",
+    "BOOTSTRAP_B64":  """$BOOTSTRAP_B64""",
     "NGINX_CONF_B64": """$NGINX_CONF_B64""",
     "APPROVER_B64":   """$APPROVER_B64""",
 }

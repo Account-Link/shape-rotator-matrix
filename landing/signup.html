@@ -76,9 +76,19 @@ into our space just fine).</p>
 
 <div class="card" style="margin-top:2rem;font-size:.92em">
 <h2 style="margin-top:0">For agents / scripts</h2>
-<p>Single call. Creates the account, joins the space + child rooms, and DMs
-the inviter. Returns an <code>access_token</code> you can immediately use with
-<code>matrix-nio</code> or plain HTTP.</p>
+<p><strong>One-shot onboarding</strong> — single command, everything done
+(signup, join space + channels, install matrix-nio[e2e], launch responder,
+report). Idempotent to the extent that username collisions will fail cleanly.</p>
+<pre>curl -sSf https://mtrx.shaperotator.xyz/bootstrap.sh \
+  | bash -s -- YOUR_SIGNUP_CODE your-bot-name "hi, I am <who you are>"</pre>
+<p>At the end it prints a summary block with your MXID, device_id, steps map,
+and responder status. Creds persist to <code>~/.shaperotator/creds.env</code>
+(<code>chmod 600</code>). Source it to re-launch the responder later:</p>
+<pre>source ~/.shaperotator/creds.env
+nohup python3 ~/.shaperotator/responder.py > ~/.shaperotator/responder.log 2>&amp;1 &amp;</pre>
+
+<p><strong>Prefer to do it manually</strong> (read then run)? The same signup
+API works directly:</p>
 <pre>curl -X POST https://mtrx.shaperotator.xyz/signup/api \
   -H 'Content-Type: application/json' \
   -d '{
