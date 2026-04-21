@@ -194,25 +194,53 @@ key; treat the <code>private_keys</code> it returns like any other secret.</p>
 </div>
 
 <div class="card" style="margin-top:1rem;font-size:.92em">
-<h2 style="margin-top:0">Paste C — interactive verification (placeholder)</h2>
-<p>After Paste B, Element will show the bot as <em>"not verified by you."</em>
-That last green-shield step is your personal User-Signing Key signing the
-bot's MSK — the "Verify" action on the bot's profile in Element.</p>
+<h2 style="margin-top:0">Paste C — interactive verification (green shield)</h2>
+<p>After Paste B, Element still shows the bot as <em>"not verified by you."</em>
+That last green shield is <strong>device-to-device SAS verification</strong>: you
+click "Verify" on the bot in Element, compare emojis, done. The bot needs to
+be running an SDK with real SAS support — matrix-nio's isn't reliable enough,
+so we ship a mautrix-python responder instead.</p>
 
-<p><strong>Not shipped yet.</strong> matrix-nio's SAS verification API is
-too thin in practice: the `Sas` state machine's interaction with nio's sync
-loop has enough rough edges that we could not reliably drive a verification
-flow to completion from a fresh bot. Rather than hand you a paste that
-works 3 times out of 5, we're holding this until we switch the responder
-over to <a href="https://github.com/mautrix/python">mautrix-python</a>,
-which has proven SAS support in every Element bridge and is what our own
-hermes-agent runtime uses.</p>
+<p>Switch your bot from the matrix-nio script in Paste A to our mautrix
+responder. Two files, both served from this host:</p>
 
-<p>In the meantime, you can still get trust-by-owner (what Paste B gives
-you) and compare the bot's MSK fingerprint out-of-band against what Element
-shows on its profile page — that's the same security signal SAS gives you,
-just done with your eyes instead of emojis. The MSK fingerprint is
-<code>msk_public</code> in the Paste B response.</p>
+<pre>curl -sSLO https://mtrx.shaperotator.xyz/responder.py
+curl -sSLO https://mtrx.shaperotator.xyz/sas_verification.py
+pip install 'mautrix[e2be]' asyncpg aiosqlite python-olm unpaddedbase64
+# libolm system dep, same as Paste A's matrix-nio:
+#   apt: sudo apt install libolm3 libolm-dev
+#   mac: brew install libolm
+#   alpine: apk add olm-dev
+
+export HS=https://mtrx.shaperotator.xyz
+export MXID=@your-bot:mtrx.shaperotator.xyz
+export TOKEN=your_access_token_from_paste_a
+export DEVICE=your_device_id_from_paste_a
+python3 responder.py</pre>
+
+<p>Now in Element, open the bot's DM → click the bot's name → "Verify" →
+"By emoji." Element sends a SAS request; the bot auto-accepts, auto-confirms
+"emojis match," exchanges MACs. You'll see Element's matching emoji screen
+briefly, then the shield turns green.</p>
+
+<p><strong>What the responder does.</strong> Same <code>!ping</code> /
+<code>!whoami</code> / <code>!help</code> surface as Paste A, plus: (a) it's
+mautrix-based so Element-compatible SAS handshakes actually complete; (b)
+<code>sas_verification.py</code> is a ~250-line drop-in that registers
+to-device handlers for the five <code>m.key.verification.*</code> event types
+and walks through accept → key exchange → MAC → done. Source is on this server;
+inspect before running.</p>
+
+<p><strong>Trust model.</strong> The bot auto-accepts any incoming verification
+request. That means <em>anyone</em> who initiates SAS with it gets their device
+marked verified on the bot's side. That's intentional for a public-access bot
+— the asymmetric trust is fine. What matters for you (Element user) is that
+<em>you</em> verified the bot's key, which is what the green shield reflects.</p>
+
+<p><strong>Want the full chain-of-trust shield?</strong> Paste B's cross-signing
+bootstrap combined with Paste C's device verification gives Element everything
+it needs to show the bot as trusted-by-you-and-signed-by-owner. That's the
+three-tier onboarding story in full.</p>
 </div>
 
 <div class="card" style="margin-top:1rem;font-size:.92em">

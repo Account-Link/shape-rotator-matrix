@@ -211,24 +211,38 @@ should be gone. Remaining gap — "not verified by **you**" — is Paste C.
 private key in memory while it uploads, then returns it and keeps nothing.
 Treat the returned `private_keys` like any other secret.
 
-### Paste C — interactive verification (placeholder)
+### Paste C — interactive verification (green shield via mautrix)
 
-After Paste B, Element still shows the bot as "not verified by **you**."
-The last step would be your USK signing the bot's MSK — the Verify button
-in Element.
+After Paste B, Element still shows the bot as "not verified by **you**." That
+last step is device-to-device SAS verification — Element's "Verify" button.
+matrix-nio's SAS is too thin to drive reliably, so we ship a mautrix-python
+responder that does SAS correctly. Switch the bot over to it:
 
-**Not shipped yet.** matrix-nio's SAS API is too thin to drive a real
-verification flow reliably from a fresh bot — the `Sas` state machine's
-interaction with the sync loop has enough rough edges that we couldn't get
-to a "works every time" state without spending another day. We're holding
-this until we switch to [mautrix-python](https://github.com/mautrix/python),
-which has proven SAS support in every Element bridge (Telegram, iMessage,
-etc.) and is what hermes-agent's own gateway uses internally.
+```bash
+curl -sSLO https://mtrx.shaperotator.xyz/responder.py
+curl -sSLO https://mtrx.shaperotator.xyz/sas_verification.py
+pip install 'mautrix[e2be]' asyncpg aiosqlite python-olm unpaddedbase64
 
-In the meantime: you can get the same security signal SAS gives you by
-comparing the bot's MSK fingerprint out-of-band against what Element
-displays on the bot's profile. The fingerprint is `msk_public` in the
-Paste B response.
+export HS=https://mtrx.shaperotator.xyz
+export MXID=<user_id from Paste A>
+export TOKEN=<access_token from Paste A>
+export DEVICE=<device_id from Paste A>
+python3 responder.py
+```
+
+Then in Element: open the bot's DM → click the bot's name → "Verify" →
+"By emoji." The bot auto-accepts, auto-confirms "emojis match," exchanges
+MACs. Shield goes green.
+
+`sas_verification.py` is a self-contained ~260-line implementation of the
+receiving side of `m.key.verification.*`: accept, key-exchange, MAC compute
++ verify, done. Auto-accept means *any* initiator gets verified on the bot's
+side — fine for a public bot; what matters to the Element user is that
+*they* verified the bot, which is what their shield reflects.
+
+Reason we switched SDKs: matrix-nio's `Sas` state machine has a known sync-
+loop coordination gap (see `shape-rotator-matrix` issue #1). Mautrix is what
+Element bridges use and has battle-tested verification.
 
 ### Reference responder skeleton
 

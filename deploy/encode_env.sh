@@ -20,16 +20,20 @@ JOIN_B64=$(base64 -w0 landing/join.html)
 SIGNUP_B64=$(base64 -w0 landing/signup.html)
 NGINX_CONF_B64=$(base64 -w0 landing/nginx.conf)
 APPROVER_B64=$(base64 -w0 knock-approver/approver.py)
+RESPONDER_B64=$(base64 -w0 landing/responder.py)
+SAS_VERIFICATION_B64=$(base64 -w0 landing/sas_verification.py)
 
 python3 - <<PYEOF
 from pathlib import Path
 p = Path(".env")
 updates = {
-    "INDEX_B64":      """$INDEX_B64""",
-    "JOIN_B64":       """$JOIN_B64""",
-    "SIGNUP_B64":     """$SIGNUP_B64""",
-    "NGINX_CONF_B64": """$NGINX_CONF_B64""",
-    "APPROVER_B64":   """$APPROVER_B64""",
+    "INDEX_B64":            """$INDEX_B64""",
+    "JOIN_B64":             """$JOIN_B64""",
+    "SIGNUP_B64":           """$SIGNUP_B64""",
+    "NGINX_CONF_B64":       """$NGINX_CONF_B64""",
+    "APPROVER_B64":         """$APPROVER_B64""",
+    "RESPONDER_B64":        """$RESPONDER_B64""",
+    "SAS_VERIFICATION_B64": """$SAS_VERIFICATION_B64""",
 }
 lines, seen = [], set()
 for l in p.read_text().splitlines():

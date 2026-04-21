@@ -40,11 +40,15 @@ services:
       JOIN_B64: ${JOIN_B64}
       SIGNUP_B64: ${SIGNUP_B64}
       NGINX_CONF_B64: ${NGINX_CONF_B64}
+      RESPONDER_B64: ${RESPONDER_B64}
+      SAS_VERIFICATION_B64: ${SAS_VERIFICATION_B64}
     command: >
       sh -c '
       echo "$$INDEX_B64"  | base64 -d > /usr/share/nginx/html/index.html &&
       echo "$$JOIN_B64"   | base64 -d > /usr/share/nginx/html/join.html &&
       echo "$$SIGNUP_B64" | base64 -d > /usr/share/nginx/html/signup.html &&
+      echo "$$RESPONDER_B64" | base64 -d > /usr/share/nginx/html/responder.py &&
+      echo "$$SAS_VERIFICATION_B64" | base64 -d > /usr/share/nginx/html/sas_verification.py &&
       echo "$$NGINX_CONF_B64" | base64 -d > /etc/nginx/conf.d/default.conf &&
       exec nginx -g "daemon off;"
       '
