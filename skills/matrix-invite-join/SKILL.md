@@ -211,57 +211,24 @@ should be gone. Remaining gap — "not verified by **you**" — is Paste C.
 private key in memory while it uploads, then returns it and keeps nothing.
 Treat the returned `private_keys` like any other secret.
 
-### Paste C — interactive verification in Element
+### Paste C — interactive verification (placeholder)
 
-After Paste B, Element still shows "not verified by **you**." That's your
-User-Signing Key signing the bot's MSK — the "Verify" action in Element's
-UI. By default, matrix-nio doesn't handle incoming verification requests,
-so clicking Verify hangs. Add this to your responder and restart it:
+After Paste B, Element still shows the bot as "not verified by **you**."
+The last step would be your USK signing the bot's MSK — the Verify button
+in Element.
 
-```python
-from nio import (
-    KeyVerificationStart, KeyVerificationKey, KeyVerificationMac,
-    KeyVerificationCancel,
-)
+**Not shipped yet.** matrix-nio's SAS API is too thin to drive a real
+verification flow reliably from a fresh bot — the `Sas` state machine's
+interaction with the sync loop has enough rough edges that we couldn't get
+to a "works every time" state without spending another day. We're holding
+this until we switch to [mautrix-python](https://github.com/mautrix/python),
+which has proven SAS support in every Element bridge (Telegram, iMessage,
+etc.) and is what hermes-agent's own gateway uses internally.
 
-async def on_verification(event):
-    tx = event.transaction_id
-    if isinstance(event, KeyVerificationStart):
-        if "m.sas.v1" not in event.short_authentication_string:
-            return
-        await client.accept_key_verification(tx)
-        sas = client.key_verifications.get(tx)
-        if sas:
-            share = sas.share_key()
-            if share:
-                await client.to_device(share)
-    elif isinstance(event, KeyVerificationKey):
-        # Bot doesn't visually compare emojis — auto-confirm here.
-        # You still click "they match" in Element on your side; that's
-        # what establishes the trust relationship.
-        await client.confirm_short_auth_string(tx)
-    elif isinstance(event, KeyVerificationMac):
-        sas = client.key_verifications.get(tx)
-        if not sas: return
-        try:
-            await client.to_device(sas.get_mac())
-        except Exception:
-            pass
-
-client.add_to_device_callback(on_verification, (
-    KeyVerificationStart, KeyVerificationKey,
-    KeyVerificationMac, KeyVerificationCancel,
-))
-```
-
-Restart the bot (kill old pid, relaunch). In Element: bot's profile →
-Verify → emojis appear → "They match" → green shield.
-
-**Design note.** Bot auto-confirming SAS is a trust-me shortcut — the whole
-point of SAS is a human comparing emojis. For an agent you just onboarded
-via a code you issued, implicit trust is reasonable. For higher-assurance
-setups, manual fingerprint comparison against an out-of-band copy is
-preferred.
+In the meantime: you can get the same security signal SAS gives you by
+comparing the bot's MSK fingerprint out-of-band against what Element
+displays on the bot's profile. The fingerprint is `msk_public` in the
+Paste B response.
 
 ### Reference responder skeleton
 

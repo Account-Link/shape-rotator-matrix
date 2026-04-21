@@ -194,65 +194,25 @@ key; treat the <code>private_keys</code> it returns like any other secret.</p>
 </div>
 
 <div class="card" style="margin-top:1rem;font-size:.92em">
-<h2 style="margin-top:0">Paste C — interactive verification in Element</h2>
-<p>After Paste B, Element still shows the bot as <em>"not verified by you."</em>
-That's the last trust step: your personal User-Signing Key signing the bot's
-MSK. In Element the button for this is the "Verify" action on the bot's
-profile — it triggers SAS (emoji) or QR verification with the bot.</p>
+<h2 style="margin-top:0">Paste C — interactive verification (placeholder)</h2>
+<p>After Paste B, Element will show the bot as <em>"not verified by you."</em>
+That last green-shield step is your personal User-Signing Key signing the
+bot's MSK — the "Verify" action on the bot's profile in Element.</p>
 
-<p>By default, matrix-nio doesn't handle incoming verification requests, so
-clicking Verify in Element will hang. Paste C is a small extension to your
-responder that auto-accepts SAS verifications. Add these imports + callback
-to your responder file (right next to the existing <code>on_ping</code>
-handler) and restart it:</p>
+<p><strong>Not shipped yet.</strong> matrix-nio's SAS verification API is
+too thin in practice: the `Sas` state machine's interaction with nio's sync
+loop has enough rough edges that we could not reliably drive a verification
+flow to completion from a fresh bot. Rather than hand you a paste that
+works 3 times out of 5, we're holding this until we switch the responder
+over to <a href="https://github.com/mautrix/python">mautrix-python</a>,
+which has proven SAS support in every Element bridge and is what our own
+hermes-agent runtime uses.</p>
 
-<pre>from nio import (
-    KeyVerificationStart, KeyVerificationKey, KeyVerificationMac,
-    KeyVerificationCancel,
-)
-
-async def on_verification(event):
-    tx = event.transaction_id
-    if isinstance(event, KeyVerificationStart):
-        if "m.sas.v1" not in event.short_authentication_string:
-            return
-        await client.accept_key_verification(tx)
-        sas = client.key_verifications.get(tx)
-        if sas:
-            share = sas.share_key()
-            if share:
-                await client.to_device(share)
-    elif isinstance(event, KeyVerificationKey):
-        # Bot doesn't visually check emojis — auto-confirm on its side.
-        # You (the human) still click "they match" in Element on your side;
-        # that's what establishes trust. The bot just doesn't stall.
-        await client.confirm_short_auth_string(tx)
-    elif isinstance(event, KeyVerificationMac):
-        sas = client.key_verifications.get(tx)
-        if not sas: return
-        try:
-            await client.to_device(sas.get_mac())
-        except Exception:
-            pass
-
-client.add_to_device_callback(on_verification, (
-    KeyVerificationStart, KeyVerificationKey,
-    KeyVerificationMac, KeyVerificationCancel,
-))</pre>
-
-<p>Restart the responder (kill old pid, launch fresh). In Element, open the
-bot's profile → <strong>Verify</strong>. Element shows a row of emojis and
-asks "do they match?" — click <strong>They match</strong>. Element now
-signals success; the bot's green shield appears.</p>
-
-<p><strong>Important design note.</strong> The bot auto-confirming SAS is a
-trust-me-bro shortcut: the whole point of SAS is <em>you</em> comparing
-emojis on two devices. For a bot, there's no human on the bot side to
-compare — you're implicitly trusting that the bot's identity is what the
-signup flow said it was. This is reasonable in our setup (only you could
-have issued the signup code), but for higher-assurance verifications you
-might prefer manual SAS against a known-good fingerprint you obtained
-out-of-band.</p>
+<p>In the meantime, you can still get trust-by-owner (what Paste B gives
+you) and compare the bot's MSK fingerprint out-of-band against what Element
+shows on its profile page — that's the same security signal SAS gives you,
+just done with your eyes instead of emojis. The MSK fingerprint is
+<code>msk_public</code> in the Paste B response.</p>
 </div>
 
 <div class="card" style="margin-top:1rem;font-size:.92em">
