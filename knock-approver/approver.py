@@ -284,9 +284,19 @@ async def signup_handler(request):
             print(f"[signup] child {child} join by {mxid} -> {st}: {_body[:200]}", flush=True)
     steps_done["children_joined"] = joined_children
 
-    # --- Step 7: DM the inviter from the new user ---
+    # --- Step 7: create an E2EE DM with the inviter from the new user ---
+    # We create the DM encrypted from the start (m.room.encryption in
+    # initial_state). We do NOT send a greeting here via raw HTTP —
+    # the server would reject plaintext m.room.message in an encrypted
+    # room. The intro is left to the bot's matrix-nio startup, which
+    # can send encrypted messages properly. We just return dm_room and
+    # intro_text so the bot knows where to post and what to say.
     inviter = (entry.get("inviter") or ONBOARDING_INVITER_MXID or "").strip()
     dm_room = None
+    intro_text = intro_raw or (
+        f"hi — I'm {displayname or mxid}, just signed up on "
+        f"{HS_PUBLIC} via a code you issued. Let me know what you need."
+    )
     if inviter:
         st, dm_body = await _as_user(
             token, "POST", "/_matrix/client/v3/createRoom",
@@ -295,22 +305,16 @@ async def signup_handler(request):
                 "invite":    [inviter],
                 "preset":    "trusted_private_chat",
                 "name":      f"{displayname or username} ↔ {inviter}",
+                "initial_state": [{
+                    "type": "m.room.encryption",
+                    "state_key": "",
+                    "content": {"algorithm": "m.megolm.v1.aes-sha2"},
+                }],
             },
         )
         if st == 200:
             dm_room = json.loads(dm_body).get("room_id")
-            intro_msg = intro_raw or (
-                f"hi — I'm {displayname or mxid}, just signed up on "
-                f"{HS_PUBLIC} via a code you issued. Let me know if you need me to do anything."
-            )
-            import uuid
-            txn = uuid.uuid4().hex
-            st2, _ = await _as_user(
-                token, "PUT",
-                f"/_matrix/client/v3/rooms/{dm_room}/send/m.room.message/{txn}",
-                {"msgtype": "m.text", "body": intro_msg},
-            )
-            steps_done["inviter_dm"] = (st2 == 200)
+            steps_done["inviter_dm"] = True
         else:
             print(f"[signup] createRoom (DM to {inviter}) -> {st}: {dm_body[:200]}", flush=True)
             steps_done["inviter_dm"] = False
@@ -328,6 +332,7 @@ async def signup_handler(request):
         "space_id":    SPACE_ID,
         "steps":       steps_done,
         "dm_room":     dm_room,
+        "intro_text":  intro_text,   # for the bot to post via nio on startup
     })
 
 async def run_http():

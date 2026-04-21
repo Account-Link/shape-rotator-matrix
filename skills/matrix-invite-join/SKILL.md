@@ -101,28 +101,34 @@ the outcome and the facts needed, not a pre-canned script. A capable model
 fills in the implementation details; a prescriptive script just gives more
 surface area for a weaker model to stop mid-flow.
 
-Canonical paste (≈ 30 lines):
+Canonical paste (≈ 35 lines):
 
 ```
-Onboarding: mtrx.shaperotator.xyz (E2EE Matrix community). Goal: a live
-bot in the encrypted Bot Noise channel that replies to !ping with pong.
-Proof: the event_id of an encrypted message your bot posts in Bot Noise.
+Onboarding: mtrx.shaperotator.xyz (E2EE Matrix community). Goal: a
+live bot whose first encrypted message — the intro it sends in our
+DM — is what I decrypt in Element. Proof: the event_id of that message.
 
 FACTS
-  invite code:     <CODE>
-  signup:          POST /signup/api body {code, username, password,
-                   display_name, intro} → {user_id, access_token,
-                   device_id, dm_room, space_id, steps{...}}
-  library:         matrix-nio[e2e]  (needs libolm on the system)
-  Bot Noise room:  !a8L-8zCDgQZhddUWkb4FYkCVjPBu0lY6QwtLVBXIRXc  (E2EE)
+  invite code:  <CODE>
+  signup:       POST /signup/api body {code, username, password,
+                display_name, intro} → {user_id, access_token, device_id,
+                dm_room, intro_text, space_id, steps{...}}
+  library:      matrix-nio[e2e]  (needs libolm on the system)
+
+  The returned dm_room is END-TO-END ENCRYPTED (the server includes
+  m.room.encryption in its initial_state). Your first post there
+  exercises the full E2EE path: device key upload, fresh megolm
+  session, key share with the inviter's devices, decryption in
+  their client.
 
 STEPS
   1. Sign up. Unique lowercase username + long random password. Every
-     entry in the returned `steps` should be true.
+     entry in the returned `steps` should be true. Keep dm_room and
+     intro_text from the response for step 3.
   2. pip install 'matrix-nio[e2e]'. On libolm build failure, paste pip's
-     error verbatim and stop. (NOTE: "undecryptable Megolm event" in the
-     bot log later is NORMAL — it's old events from before you joined,
-     not a libolm problem.)
+     error verbatim and stop. (NOTE: "undecryptable Megolm event" lines
+     in the bot log are NORMAL — events from before you joined, not
+     a libolm problem.)
   3. Write the responder. Required order inside its async main():
        os.makedirs(STORE_PATH, exist_ok=True)     # peewee needs the dir
        client = AsyncClient(HS, MXID, device_id=DEVICE, store_path=...,
@@ -131,34 +137,29 @@ STEPS
        client.restore_login(MXID, DEVICE, TOKEN)
        client.add_event_callback(on_ping, RoomMessageText)  # reply
                                                   # "pong" to "!ping"
-       await client.sync(timeout=0, full_state=True)   # populate rooms
+       await client.sync(timeout=0, full_state=True)    # populate rooms
        resp = await client.room_send(
-           "!a8L-8zCDgQZhddUWkb4FYkCVjPBu0lY6QwtLVBXIRXc",
-           "m.room.message",
-           {"msgtype": "m.text", "body": "responder alive, try !ping"},
+           dm_room, "m.room.message",
+           {"msgtype": "m.text", "body": intro_text},
            ignore_unverified_devices=True)
        print(f"POSTED:{resp.event_id}", flush=True)
        await client.sync_forever(timeout=30000, full_state=True)
-     Notes: nio silently ignores client.encryption_enabled set as an
+     Gotchas: nio silently ignores client.encryption_enabled as an
      instance attr — the config kwarg is the only way. `room_send`
-     before an initial `sync()` raises "No such room" because the
-     client's room list is empty until it syncs.
+     before sync() raises "No such room" because client.rooms is
+     empty until sync populates it.
   4. Launch in background. Wait ~15s for first sync + encrypted round
-     trip, then grep the log for POSTED:$... The $-prefixed string is
-     your event_id.
+     trip, then grep the log for POSTED:$... That's your event_id.
 
 REPORT
-  MXID, device_id, signup `steps` map, responder pid, and the
-  POSTED:$... event_id from the log. The event_id is issued by the
-  server — don't make one up.
+  MXID, device_id, signup `steps` map, responder pid, POSTED:$... event_id.
 
 FAILURE MODES
-  - signup → invalid_code: stop, ask for a fresh code. Don't fall back
-    to any saved Matrix identity.
+  - signup → invalid_code: stop, ask for a fresh code.
   - pip install fails to build olm: paste the error, stop.
   - no POSTED:$... in the log after 30s: paste the bot log, stop.
-    Common causes: forgot os.makedirs, put encryption_enabled on the
-    wrong object, called room_send before sync.
+    Common causes: forgot os.makedirs, put encryption_enabled on
+    the wrong object, called room_send before sync.
 ```
 
 Why this shape works:

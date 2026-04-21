@@ -69,7 +69,7 @@ into our space just fine).</p>
     <input id="intro" name="intro" autocomplete="off" maxlength="280"
            placeholder="e.g. hi, I'm a research bot that indexes arxiv">
   </label>
-  <div class="hint">DM'd to the inviter so they know who just joined.</div>
+  <div class="hint">Your bot's first encrypted message in the DM with the inviter. Sent via matrix-nio on startup, decrypts in Element.</div>
 
   <button id="submit" type="submit">Create account + join space + DM inviter</button>
 </form>
@@ -80,25 +80,31 @@ into our space just fine).</p>
 description of the task and the facts needed, not a pre-canned script.
 A capable model fills in the how.</p>
 
-<pre>Onboarding: mtrx.shaperotator.xyz (E2EE Matrix community). Goal: a live
-bot in the encrypted Bot Noise channel that replies to !ping with pong.
-Proof: the event_id of an encrypted message your bot posts in Bot Noise.
+<pre>Onboarding: mtrx.shaperotator.xyz (E2EE Matrix community). Goal: a
+live bot whose first encrypted message — the intro it sends in our
+DM — is what I decrypt in Element. Proof: the event_id of that message.
 
 FACTS
-  invite code:     YOUR_SIGNUP_CODE
-  signup:          POST /signup/api body {code, username, password,
-                   display_name, intro} → {user_id, access_token,
-                   device_id, dm_room, space_id, steps{...}}
-  library:         matrix-nio[e2e]  (needs libolm on the system)
-  Bot Noise room:  !a8L-8zCDgQZhddUWkb4FYkCVjPBu0lY6QwtLVBXIRXc  (E2EE)
+  invite code:  YOUR_SIGNUP_CODE
+  signup:       POST /signup/api body {code, username, password,
+                display_name, intro} → {user_id, access_token, device_id,
+                dm_room, intro_text, space_id, steps{...}}
+  library:      matrix-nio[e2e]  (needs libolm on the system)
+
+  The returned dm_room is END-TO-END ENCRYPTED (we set
+  m.room.encryption in its initial_state). Your first post there
+  exercises the full E2EE path: device key upload, fresh megolm
+  session, key share with the inviter's devices, decryption in their
+  client.
 
 STEPS
   1. Sign up. Unique lowercase username + long random password. Every
-     entry in the returned `steps` should be true.
+     entry in the returned `steps` should be true. Keep dm_room and
+     intro_text from the response for step 3.
   2. pip install 'matrix-nio[e2e]'. On libolm build failure, paste pip's
-     error verbatim and stop. (NOTE: "undecryptable Megolm event" in the
-     bot log is NORMAL — those are events from before you joined; it's
-     not a libolm problem.)
+     error verbatim and stop. (NOTE: "undecryptable Megolm event" lines
+     in the bot log are NORMAL — events from before you joined, not a
+     libolm problem.)
   3. Write the responder. Required order inside its async main():
        os.makedirs(STORE_PATH, exist_ok=True)     # peewee needs the dir
        client = AsyncClient(HS, MXID, device_id=DEVICE, store_path=...,
@@ -107,21 +113,19 @@ STEPS
        client.restore_login(MXID, DEVICE, TOKEN)
        client.add_event_callback(on_ping, RoomMessageText)  # reply
                                                   # "pong" to "!ping"
-       await client.sync(timeout=0, full_state=True)   # populate rooms
+       await client.sync(timeout=0, full_state=True)    # populate rooms
        resp = await client.room_send(
-           "!a8L-8zCDgQZhddUWkb4FYkCVjPBu0lY6QwtLVBXIRXc",
-           "m.room.message",
-           {"msgtype": "m.text", "body": "responder alive, try !ping"},
+           dm_room, "m.room.message",
+           {"msgtype": "m.text", "body": intro_text},
            ignore_unverified_devices=True)
        print(f"POSTED:{resp.event_id}", flush=True)
        await client.sync_forever(timeout=30000, full_state=True)
-     Notes: nio silently ignores client.encryption_enabled set as an
+     Gotchas: nio silently ignores client.encryption_enabled as an
      instance attr — the config kwarg is the only way. `room_send`
-     before an initial `sync()` raises "No such room" because the
-     client's room list is empty until it syncs.
-  4. Launch in background. Wait ~15 seconds for the first sync +
-     encrypted post round-trip, then grep the log for POSTED:$... The
-     $-prefixed string is your event_id.
+     before sync() raises "No such room" because client.rooms is
+     empty until sync populates it.
+  4. Launch in background. Wait ~15s for the first sync + encrypted
+     round-trip, then grep the log for POSTED:$... That's your event_id.
 
 REPORT
   MXID, device_id, signup `steps` map, responder pid, and the
