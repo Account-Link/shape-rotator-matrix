@@ -106,7 +106,9 @@ Database.create("sqlite:///...", upgrade_table=PgCryptoStore.upgrade_table)
 → share_keys()
 ```
 
-**Cross-signing auto-path via `olm.generate_recovery_key()` intermittently fails (UIA quirk).** Manual fallback:
+**Cross-signing auto-path via `olm.generate_recovery_key()` is the right default.** It does generate-seeds → upload-to-SSSS → publish-publics → sign-own-device in one call, and produces correctly-formatted unpadded keyids (mautrix uses python-olm's `PkSigning.public_key`, which is unpadded). On Continuwuity it works without UIA; Synapse needs `auth=<m.login.password>`. Soft-failure pattern (warning + continue) is fine — recovery-key path on next start with `MATRIX_RECOVERY_KEY` set will recover. *Open PR adding this as a hermes-agent default: [NousResearch/hermes-agent#14871](https://github.com/NousResearch/hermes-agent/pull/14871).*
+
+Manual fallback (rarely needed now):
 1. Generate `CrossSigningSeeds`
 2. `ssss.generate_and_upload_key`
 3. `_upload_cross_signing_keys_to_ssss`
@@ -114,9 +116,9 @@ Database.create("sqlite:///...", upgrade_table=PgCryptoStore.upgrade_table)
 5. `ssss.set_default_key_id`
 6. `sign_own_device`
 
-**Password UIA is required; token-only auth won't satisfy it.**
+**⚠️ Padded base64 in keyids = silent Element rejection.** This is *the* cross-signing footgun. If you write your own bootstrap (the "fully custom path" below) and use `base64.b64encode(b).decode()` instead of `base64.b64encode(b).rstrip(b"=").decode()`, the resulting keyids look like `ed25519:akWAqt...=` (trailing `=`). The keys upload fine, the homeserver stores them fine, federation serves them fine — but **matrix-rust-sdk silently rejects the entire master_keys entry** in `/keys/query` validation. Element's `userHasCrossSigningKeys(bot, true)` returns `false`, no chain is computed, and the bot shows "Encrypted by a device not verified by its owner" forever. No error anywhere. Confirmed via clean A/B (same homeserver, two users, only padding differs). The `_crosssign` endpoint in `knock-approver/approver.py:_b64()` does the right thing; old `bootstrap_cross_signing.py` in `hermes-agent/` did not — fixed in-tree.
 
-**Fully custom path without OlmMachine also works.** Generate three ed25519 keypairs with `nacl.signing`, sign them into `master_key`/`self_signing_key`/`user_signing_key` objects, POST to `/_matrix/client/v3/keys/device_signing/upload` with a password-UIA `auth` block. Then `/keys/query` to retrieve the existing device, sign it with `self_signing_key`, POST to `/keys/signatures/upload`. Canonical JSON: `json.dumps(..., ensure_ascii=False, separators=(",", ":"), sort_keys=True)`, stripping `signatures`/`unsigned` before signing.
+**Fully custom path without OlmMachine also works** (kept for reference). Generate three ed25519 keypairs with `nacl.signing`, sign them into `master_key`/`self_signing_key`/`user_signing_key` objects, POST to `/_matrix/client/v3/keys/device_signing/upload` with a password-UIA `auth` block. Then `/keys/query` to retrieve the existing device, sign it with `self_signing_key`, POST to `/keys/signatures/upload`. Canonical JSON: `json.dumps(..., ensure_ascii=False, separators=(",", ":"), sort_keys=True)`, stripping `signatures`/`unsigned` before signing. **Always `.rstrip(b"=")` the base64 of any pubkey that becomes part of a keyid.**
 
 **Trust relaxation for bots:**
 ```python
