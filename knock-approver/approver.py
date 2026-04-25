@@ -96,12 +96,81 @@ def merge_seed(path, env_key):
         print(f"seeded {added} new entries into {path.name} from {env_key}", flush=True)
 
 
-# --- Knock approval ---
+# --- Knock approval (per-knock vetting room with a haiku captcha) ---
+#
+# A valid knock no longer invites straight to the space. Instead the approver
+# creates a fresh 1:1 vetting room (invite-only, the knocker is the only
+# invitee) and posts a wikipedia-fact haiku challenge. Once the knocker joins
+# and replies with a 3-line haiku that contains the required keyword, the bot
+# invites them to the space — and the existing `restricted` join rule on
+# child rooms takes over from there.
 
-async def approve_knock(session, room_id, user_id):
-    url = f"{HS}/_matrix/client/v3/rooms/{room_id}/invite"
-    async with session.post(url, json={"user_id": user_id, "reason": "auto-approved"}) as r:
+VETTING_PATH      = Path(os.environ.get("VETTING_PATH",       "/data/vetting.json"))
+VETTING_TIMEOUT   = int(os.environ.get("VETTING_TIMEOUT_SEC", "7200"))
+VETTING_MAX_TRIES = int(os.environ.get("VETTING_MAX_TRIES",   "3"))
+
+# Stop-words too generic to use as the haiku-keyword constraint.
+_STOPWORDS = {"with", "from", "that", "this", "their", "have", "been",
+              "were", "into", "over", "when", "what", "where", "which",
+              "would", "could", "should", "about", "after", "before"}
+
+
+async def _fetch_wiki_challenge():
+    """Random wikipedia article -> (title, longest non-stopword >=4-char alpha word)."""
+    url = "https://en.wikipedia.org/api/rest_v1/page/random/summary"
+    headers = {"User-Agent": "shape-rotator-vetting/1.0", "Accept": "application/json"}
+    async with aiohttp.ClientSession(headers=headers) as s:
+        async with s.get(url) as r:
+            body = await r.json()
+    title = body["title"]
+    words = [w.strip(".,;:'\"()[]") for w in title.split()]
+    candidates = [w for w in words
+                  if len(w) >= 4 and w.isalpha() and w.lower() not in _STOPWORDS]
+    keyword = max(candidates, key=len)
+    return title, keyword
+
+
+async def _send_msg(session, room_id, text):
+    txn = f"m{int(time.time()*1000)}-{os.urandom(2).hex()}"
+    url = f"{HS}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{txn}"
+    async with session.put(url, json={"msgtype": "m.text", "body": text}) as r:
+        return r.status
+
+
+async def _create_vetting_room(session, mxid):
+    body = {
+        "preset": "private_chat",   # creator PL 100, invitee PL 0
+        "invite": [mxid],
+        "is_direct": False,
+        "name":  f"shape-rotator vetting · {mxid}",
+        "topic": "captcha airlock — answer the challenge to be invited to the space.",
+    }
+    async with session.post(f"{HS}/_matrix/client/v3/createRoom", json=body) as r:
+        if r.status != 200:
+            return None, await r.text()
+        return (await r.json())["room_id"], None
+
+
+def _vet(displayname, message, keyword):
+    if not displayname:
+        return False, "set a displayname in element first, then re-paste the haiku"
+    text = (message or "").strip()
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) != 3:
+        return False, "haiku is three lines"
+    if not (30 <= len(text) <= 400):
+        return False, "haiku should be roughly 30–400 chars"
+    if keyword.lower() not in text.lower():
+        return False, f"include the word '{keyword}' somewhere"
+    return True, "ok"
+
+
+async def _promote(session, mxid):
+    url = f"{HS}/_matrix/client/v3/rooms/{SPACE_ID}/invite"
+    async with session.post(url,
+                            json={"user_id": mxid, "reason": "vetted via airlock"}) as r:
         return r.status, await r.text()
+
 
 async def handle_knock(session, room_id, user_id, reason):
     code = (reason or "").strip()
@@ -111,18 +180,36 @@ async def handle_knock(session, room_id, user_id, reason):
         audit({"type": "knock_rejected", "user": user_id, "room": room_id, "reason": reason})
         print(f"[knock rejected] {user_id}", flush=True)
         return
-    status, body = await approve_knock(session, room_id, user_id)
-    if status == 200:
-        entry["uses_remaining"] -= 1
-        codes[code] = entry
-        _save(CODES_PATH, codes)
-        audit({"type": "knock_approved", "user": user_id, "room": room_id, "code": code,
-               "uses_left": entry["uses_remaining"]})
-        print(f"[knock approved] {user_id} via {code} (left={entry['uses_remaining']})", flush=True)
-    else:
-        audit({"type": "knock_invite_failed", "user": user_id, "room": room_id, "code": code,
-               "status": status, "body": body[:200]})
-        print(f"[knock failed] {user_id} status={status}", flush=True)
+
+    title, keyword = await _fetch_wiki_challenge()
+    vroom, err = await _create_vetting_room(session, user_id)
+    if not vroom:
+        audit({"type": "vetting_room_failed", "user": user_id,
+               "code": code, "err": (err or "")[:200]})
+        print(f"[vetting room failed] {user_id}: {err[:200]}", flush=True)
+        return
+
+    entry["uses_remaining"] -= 1
+    codes[code] = entry
+    _save(CODES_PATH, codes)
+
+    state = _load(VETTING_PATH)
+    state[vroom] = {
+        "mxid": user_id, "code": code, "created": time.time(),
+        "title": title, "keyword": keyword,
+        "tries_left": VETTING_MAX_TRIES, "promoted": False, "closed": False,
+    }
+    _save(VETTING_PATH, state)
+
+    await _send_msg(session, vroom,
+        f"hi {user_id} — quick captcha to keep bots out of shape rotator.\n\n"
+        f"write a 3-line haiku about: {title}\n"
+        f"include the word \"{keyword}\" somewhere.\n"
+        f"reply in this room. {VETTING_MAX_TRIES} tries.")
+    audit({"type": "vetting_room_created", "user": user_id, "code": code,
+           "room": vroom, "title": title, "keyword": keyword})
+    print(f"[vetting] {user_id} -> {vroom} ({title!r} / {keyword})", flush=True)
+
 
 def iter_knock_events(rooms_data):
     for room_id, rd in rooms_data.get("join", {}).items():
@@ -136,6 +223,88 @@ def iter_knock_events(rooms_data):
                 if c.get("membership") != "knock":
                     continue
                 yield room_id, ev["state_key"], c.get("reason", "")
+
+
+def iter_vetting_rooms(rooms_data, vetting_state):
+    """For each open vetting room we own, yield
+    (room_id, meta, join_event_for_user_or_None, list_of_user_messages)."""
+    for room_id, rd in rooms_data.get("join", {}).items():
+        meta = vetting_state.get(room_id)
+        if not meta or meta.get("promoted") or meta.get("closed"):
+            continue
+        join_ev = None
+        for section in ("state", "timeline"):
+            for ev in rd.get(section, {}).get("events", []):
+                if (ev.get("type") == "m.room.member"
+                        and ev.get("state_key") == meta["mxid"]
+                        and (ev.get("content") or {}).get("membership") == "join"):
+                    join_ev = ev
+        msgs = [ev for ev in rd.get("timeline", {}).get("events", [])
+                if ev.get("type") == "m.room.message"
+                and ev.get("sender") == meta["mxid"]]
+        yield room_id, meta, join_ev, msgs
+
+
+async def process_vetting_room(session, room_id, meta, join_ev, msgs):
+    """Process new messages in one vetting room. Returns updated meta or None."""
+    if not join_ev or not msgs:
+        return None
+    displayname = (join_ev.get("content") or {}).get("displayname", "")
+    keyword = meta["keyword"]
+    for msg in msgs:
+        text = (msg.get("content") or {}).get("body", "")
+        ok, why = _vet(displayname, text, keyword)
+        if ok:
+            st, body = await _promote(session, meta["mxid"])
+            if st == 200:
+                meta["promoted"] = True
+                meta["promoted_at"] = time.time()
+                meta["displayname"] = displayname
+                await _send_msg(session, room_id,
+                    "nice — invited you to shape rotator. you can leave this room.")
+                audit({"type": "promoted", "user": meta["mxid"],
+                       "displayname": displayname, "room": room_id})
+                print(f"[promoted] {meta['mxid']} ({displayname})", flush=True)
+            else:
+                audit({"type": "promote_failed", "user": meta["mxid"],
+                       "status": st, "body": body[:200]})
+                print(f"[promote failed] {meta['mxid']} status={st}", flush=True)
+            return meta
+        meta["tries_left"] -= 1
+        if meta["tries_left"] <= 0:
+            await _send_msg(session, room_id,
+                "out of tries. closing this room — get a fresh code and try again.")
+            async with session.post(
+                f"{HS}/_matrix/client/v3/rooms/{room_id}/leave",
+                json={"reason": "vetting failed"}) as r:
+                pass
+            meta["closed"] = True
+            meta["closed_reason"] = "tries_exhausted"
+            audit({"type": "vetting_failed", "user": meta["mxid"], "room": room_id})
+            return meta
+        await _send_msg(session, room_id,
+            f"not yet — {why}. {meta['tries_left']} tries left.")
+    return meta
+
+
+async def cleanup_stale_vetting(session, vetting_state):
+    """Leave vetting rooms older than VETTING_TIMEOUT. Returns True if state changed."""
+    now = time.time()
+    dirty = False
+    for vroom, meta in list(vetting_state.items()):
+        if meta.get("promoted") or meta.get("closed"):
+            continue
+        if now - meta.get("created", 0) > VETTING_TIMEOUT:
+            async with session.post(
+                f"{HS}/_matrix/client/v3/rooms/{vroom}/leave",
+                json={"reason": "vetting timeout"}) as r:
+                pass
+            meta["closed"] = True
+            meta["closed_reason"] = "timeout"
+            audit({"type": "vetting_timeout", "user": meta["mxid"], "room": vroom})
+            dirty = True
+    return dirty
+
 
 async def sync_loop():
     since = SYNC_STATE.read_text().strip() if SYNC_STATE.exists() else None
@@ -160,8 +329,22 @@ async def sync_loop():
                 continue
             since = data["next_batch"]
             SYNC_STATE.write_text(since)
+
             for room_id, user_id, reason in iter_knock_events(data.get("rooms", {})):
                 await handle_knock(s, room_id, user_id, reason)
+
+            vetting_state = _load(VETTING_PATH)
+            v_dirty = False
+            for vroom, meta, join_ev, msgs in iter_vetting_rooms(
+                    data.get("rooms", {}), vetting_state):
+                updated = await process_vetting_room(s, vroom, meta, join_ev, msgs)
+                if updated is not None:
+                    vetting_state[vroom] = updated
+                    v_dirty = True
+            if await cleanup_stale_vetting(s, vetting_state):
+                v_dirty = True
+            if v_dirty:
+                _save(VETTING_PATH, vetting_state)
 
 
 # --- Signup auth proxy ---
@@ -538,10 +721,11 @@ async def run_http():
 
 async def main():
     print(f"approver starting. space={SPACE_ID} signup_enabled={bool(REG_TOKEN)}", flush=True)
-    for p in (CODES_PATH, SIGNUP_PATH, LOG_PATH):
+    for p in (CODES_PATH, SIGNUP_PATH, LOG_PATH, VETTING_PATH):
         p.parent.mkdir(parents=True, exist_ok=True)
-    if not CODES_PATH.exists():  _save(CODES_PATH,  {})
-    if not SIGNUP_PATH.exists(): _save(SIGNUP_PATH, {})
+    if not CODES_PATH.exists():   _save(CODES_PATH,   {})
+    if not SIGNUP_PATH.exists():  _save(SIGNUP_PATH,  {})
+    if not VETTING_PATH.exists(): _save(VETTING_PATH, {})
     merge_seed(CODES_PATH,  "INITIAL_CODES")
     merge_seed(SIGNUP_PATH, "INITIAL_SIGNUP_CODES")
 

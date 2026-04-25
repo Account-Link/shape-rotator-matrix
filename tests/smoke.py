@@ -114,12 +114,24 @@ def test_signup_path():
     return mxid
 
 
-# --- Path B: knock (federated-guest style) ---
+# --- Path B: knock -> vetting room -> haiku captcha -> space invite ---
+
+import re
+
+def _wait_for_invite(token, predicate, timeout=15):
+    """Poll /sync until an invited room matches predicate(rid). Returns rid or None."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        _s, sync = http("GET", f"{HS}/_matrix/client/v3/sync?timeout=0", token=token)
+        for rid in sync.get("rooms", {}).get("invite", {}).keys():
+            if predicate(rid):
+                return rid
+        time.sleep(1)
+    return None
+
 
 def test_knock_path():
     # Register a throwaway account on THIS server to simulate a federated guest.
-    # (In real federation the guest's account lives elsewhere, but the knock
-    # endpoint behavior is the same.)
     username = f"smoke_knock_{int(time.time())}_{secrets.token_hex(2)}"
     print(f"\n[knock] test account: {username}", flush=True)
 
@@ -141,25 +153,64 @@ def test_knock_path():
     token = r["access_token"]
     mxid  = r["user_id"]
 
+    # _vet requires a non-empty displayname; set one before knocking.
+    http("PUT", f"{HS}/_matrix/client/v3/profile/{urllib.parse.quote(mxid)}/displayname",
+         token=token, body={"displayname": f"smoke-{secrets.token_hex(2)}"})
+
     status, _ = http(
         "POST",
         f"{HS}/_matrix/client/v3/knock/{urllib.parse.quote(SPACE_ID)}",
         token=token, body={"reason": KNOCK_CODE})
     log("knock posted", status == 200, f"status={status}")
 
-    # Poll for auto-approval (should arrive within a few seconds)
-    deadline = time.time() + 15
-    got_invite = False
+    # Approver should invite to a NEW per-knock vetting room (not the space).
+    space_prefix = SPACE_ID.split(":")[0]
+    vetting_room = _wait_for_invite(token, lambda rid: rid.split(":")[0] != space_prefix)
+    log("vetting room invite within 15s", bool(vetting_room),
+        f"room={vetting_room}")
+    if not vetting_room:
+        return [mxid]
+
+    status, _ = http("POST",
+                     f"{HS}/_matrix/client/v3/join/{urllib.parse.quote(vetting_room)}",
+                     token=token, body={})
+    log("joined vetting room", status == 200, f"status={status}")
+
+    # Pull the challenge — server posts it after createRoom, but the bot's
+    # message may take a beat to be visible to a fresh joiner.
+    keyword = None
+    deadline = time.time() + 10
     while time.time() < deadline:
         _s, sync = http("GET", f"{HS}/_matrix/client/v3/sync?timeout=0", token=token)
-        invites = list(sync.get("rooms", {}).get("invite", {}).keys())
-        if any(rid.split(":")[0] == SPACE_ID.split(":")[0] for rid in invites):
-            got_invite = True
+        joined = sync.get("rooms", {}).get("join", {}).get(vetting_room, {})
+        for ev in joined.get("timeline", {}).get("events", []):
+            if ev.get("type") != "m.room.message":
+                continue
+            body = (ev.get("content") or {}).get("body", "")
+            m = re.search(r'include the word "([^"]+)"', body)
+            if m:
+                keyword = m.group(1)
+                break
+        if keyword:
             break
         time.sleep(1)
-    log("auto-approved within 15s", got_invite)
+    log("challenge keyword visible", bool(keyword), f"keyword={keyword!r}")
+    if not keyword:
+        return [mxid]
 
-    # Try a knock with a bogus code; should stay unapproved
+    haiku = f"silent {keyword} hum\nfloating in the morning fog\nspring wind blowing through"
+    status, _ = http(
+        "PUT",
+        f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(vetting_room)}"
+        f"/send/m.room.message/smoke-haiku-{int(time.time())}",
+        token=token, body={"msgtype": "m.text", "body": haiku})
+    log("haiku sent", status == 200, f"status={status}")
+
+    # Now wait for the actual space invite.
+    space_invite = _wait_for_invite(token, lambda rid: rid.split(":")[0] == space_prefix)
+    log("space invite after vetting (within 15s)", bool(space_invite))
+
+    # Bad-code path: knock with a bogus code; nothing should ever be invited.
     username2 = f"smoke_badcode_{int(time.time())}_{secrets.token_hex(2)}"
     _s, init = http("POST", f"{HS}/_matrix/client/v3/register", body={})
     sess2 = init["session"]
@@ -177,8 +228,8 @@ def test_knock_path():
     time.sleep(8)
     _s, sync = http("GET", f"{HS}/_matrix/client/v3/sync?timeout=0", token=bad_token)
     invites = list(sync.get("rooms", {}).get("invite", {}).keys())
-    log("bad code stays unapproved",
-        not any(rid.split(":")[0] == SPACE_ID.split(":")[0] for rid in invites))
+    log("bad code: no invites at all", len(invites) == 0,
+        f"invites={invites}")
 
     return [mxid, bad_mxid]
 
