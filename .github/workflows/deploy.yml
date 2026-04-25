@@ -1,0 +1,88 @@
+name: deploy
+
+# Auto-deploy mtrx.shaperotator.xyz on every push to main, gated on the
+# e2e test workflow. To trigger an out-of-band deploy (rotating a secret,
+# emergency push), use the "Run workflow" button (workflow_dispatch).
+#
+# Required GitHub secrets — set under Settings → Secrets and variables →
+# Actions:
+#
+#   PHALA_API_KEY            phala CLI api token; deploys against the cvm
+#   NAMECHEAP_USERNAME       DNS-01 LE creds for dstack-ingress
+#   NAMECHEAP_API_KEY        ditto
+#   REGISTRATION_TOKEN       continuwuity registration token
+#   KNOCK_APPROVER_TOKEN     access token of @shape-rotator-2 (PL ≥ 50 in space)
+#   DSTACK_AUTHORIZED_KEYS   ssh authorized_keys for the CVM (one line)
+#   ONBOARDING_INVITER_MXID  e.g. @socrates1024:matrix.org
+#   SHAPEROTATOR_SPACE_ID    !4FL8uL5OEYL...mm-g (unsuffixed)
+#   SPACE_CHILD_IDS          comma-separated unsuffixed child ids
+#   INITIAL_CODES            JSON, can be {} (no extra knock codes)
+#   INITIAL_SIGNUP_CODES     JSON, can be {} (no extra signup codes)
+#
+# The CVM ID `dstack-matrix` is the name on the Phala dashboard. Change it
+# below if the CVM is renamed or replaced.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    uses: ./.github/workflows/test.yml
+
+  deploy:
+    needs: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: install phala CLI
+        run: npm install -g phala
+
+      - name: build .env
+        env:
+          NAMECHEAP_USERNAME: ${{ secrets.NAMECHEAP_USERNAME }}
+          NAMECHEAP_API_KEY: ${{ secrets.NAMECHEAP_API_KEY }}
+          REGISTRATION_TOKEN: ${{ secrets.REGISTRATION_TOKEN }}
+          KNOCK_APPROVER_TOKEN: ${{ secrets.KNOCK_APPROVER_TOKEN }}
+          DSTACK_AUTHORIZED_KEYS: ${{ secrets.DSTACK_AUTHORIZED_KEYS }}
+          ONBOARDING_INVITER_MXID: ${{ secrets.ONBOARDING_INVITER_MXID }}
+          SHAPEROTATOR_SPACE_ID: ${{ secrets.SHAPEROTATOR_SPACE_ID }}
+          SPACE_CHILD_IDS: ${{ secrets.SPACE_CHILD_IDS }}
+          INITIAL_CODES: ${{ secrets.INITIAL_CODES }}
+          INITIAL_SIGNUP_CODES: ${{ secrets.INITIAL_SIGNUP_CODES }}
+        run: |
+          {
+            echo "NAMECHEAP_USERNAME=$NAMECHEAP_USERNAME"
+            echo "NAMECHEAP_API_KEY=$NAMECHEAP_API_KEY"
+            echo "REGISTRATION_TOKEN=$REGISTRATION_TOKEN"
+            echo "KNOCK_APPROVER_TOKEN=$KNOCK_APPROVER_TOKEN"
+            echo "DSTACK_AUTHORIZED_KEYS=$DSTACK_AUTHORIZED_KEYS"
+            echo "ONBOARDING_INVITER_MXID=$ONBOARDING_INVITER_MXID"
+            echo "SHAPEROTATOR_SPACE_ID=$SHAPEROTATOR_SPACE_ID"
+            echo "SPACE_CHILD_IDS=$SPACE_CHILD_IDS"
+            echo "INITIAL_CODES=$INITIAL_CODES"
+            echo "INITIAL_SIGNUP_CODES=$INITIAL_SIGNUP_CODES"
+          } > .env
+          bash deploy/encode_env.sh
+
+      - name: phala deploy
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+        run: |
+          phala deploy \
+            --api-token "$PHALA_CLOUD_API_KEY" \
+            --cvm-id dstack-matrix \
+            --compose docker-compose.yml \
+            --env-file .env \
+            --wait

@@ -26,8 +26,12 @@ import json, os, re, secrets, subprocess, sys, time, urllib.error, urllib.parse,
 from pathlib import Path
 
 HS = os.environ.get("DEV_HS", "http://localhost:46167").rstrip("/")
-REG_TOKEN = "dev-token"  # matches dev/docker-compose.yml
-STATE = Path(__file__).parent / ".dev-state.json"
+REG_TOKEN = os.environ.get("CONDUWUIT_REGISTRATION_TOKEN", "dev-token")
+STATE = Path(os.environ.get("DEV_STATE_PATH",
+                            str(Path(__file__).parent / ".dev-state.json")))
+# Pre-supplied bootstrap token (e.g. CI scrapes from `docker logs` on the host
+# and passes it in here so the bootstrap container doesn't need docker access).
+ENV_BOOTSTRAP_TOKEN = os.environ.get("CONDUWUIT_BOOTSTRAP_TOKEN", "").strip()
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "dev-admin-password-longenough"
@@ -73,8 +77,11 @@ def save_state(state):
 
 def read_bootstrap_token():
     """Continuwuity prints a one-time registration token on first boot, before
-    the configured CONDUWUIT_REGISTRATION_TOKEN takes effect. Grab it from
-    the container logs so the first user can register."""
+    the configured CONDUWUIT_REGISTRATION_TOKEN takes effect. Either pass it
+    in via CONDUWUIT_BOOTSTRAP_TOKEN env (CI / containerised case where
+    docker isn't available) or scrape it from container logs (local dev)."""
+    if ENV_BOOTSTRAP_TOKEN:
+        return ENV_BOOTSTRAP_TOKEN
     try:
         logs = subprocess.run(
             ["docker", "logs", "dev-continuwuity-1"],
@@ -257,6 +264,8 @@ def main():
     echo(f"export HS={HS!r}")
     echo(f"export HS_PUBLIC={HS!r}")
     echo(f"export MATRIX_TOKEN={admin_token!r}")
+    echo(f"export ADMIN_TOKEN={admin_token!r}")
+    echo(f"export ADMIN_MXID={admin_mxid!r}")
     # Use whatever form createRoom returned. Continuwuity is inconsistent
     # about whether room IDs come back with or without the `:server` suffix
     # — /invite rejects the wrong form with a misleading error. Trust the
@@ -265,11 +274,8 @@ def main():
     echo(f"export SPACE_CHILD_IDS={','.join(child_ids)!r}")
     echo(f"export CONDUWUIT_REGISTRATION_TOKEN={REG_TOKEN!r}")
     echo(f"export ONBOARDING_INVITER_MXID={admin_mxid!r}")
-    echo(f"export INITIAL_CODES={signup_seed!r}".replace("'", "\\'")  # bash-safe
-          if False else f"export INITIAL_CODES={json.dumps(json.loads(signup_seed))!r}")
-    echo(f"export INITIAL_SIGNUP_CODES={json.dumps(json.loads(signup_seed))!r}")
-    echo(f"# Note: in this dev env the SAME code works for both signup and knock if you want,")
-    echo(f"# but the seeds above assign them separately:")
+    echo(f"export INITIAL_CODES={knock_seed!r}")
+    echo(f"export INITIAL_SIGNUP_CODES={signup_seed!r}")
     echo(f"export DEV_SIGNUP_CODE={signup_code!r}")
     echo(f"export DEV_KNOCK_CODE={knock_code!r}")
     echo(f"# Admin MXID: {admin_mxid}")

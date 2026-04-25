@@ -247,9 +247,14 @@ def iter_vetting_rooms(rooms_data, vetting_state):
 
 async def process_vetting_room(session, room_id, meta, join_ev, msgs):
     """Process new messages in one vetting room. Returns updated meta or None."""
-    if not join_ev or not msgs:
-        return None
-    displayname = (join_ev.get("content") or {}).get("displayname", "")
+    # Persist displayname the first time we see the user's join event — Matrix
+    # /sync returns the join event in one batch and the user's later messages
+    # in subsequent batches, so we can't require both in the same cycle.
+    if join_ev:
+        meta["displayname"] = (join_ev.get("content") or {}).get("displayname", "")
+    if not msgs:
+        return meta if join_ev else None
+    displayname = meta.get("displayname", "")
     keyword = meta["keyword"]
     for msg in msgs:
         text = (msg.get("content") or {}).get("body", "")
