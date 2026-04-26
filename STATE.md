@@ -41,10 +41,12 @@ Running at: https://mtrx.shaperotator.xyz
 - `continuwuity` (Rust Matrix homeserver, RocksDB)
 - `landing` (nginx serving `/`, `/join?code=…`, `/signup` + proxying
   `/signup/api*` to the approver)
-- `knock-approver` (single Python process that does (a) /sync knock auto-
-  approval for community-invite codes, (b) HTTP `/signup/api` for account
-  creation + full onboarding dance, (c) HTTP `/signup/api/crosssign` for
-  Paste B cross-signing bootstrap)
+- `knock-approver` (single Python process that does (a) /sync knock
+  handling — on a valid code, spawns a fresh per-knock vetting room and
+  posts a wikipedia-fact haiku captcha; only invites to the space after
+  the knocker replies with a valid haiku, (b) HTTP `/signup/api` for
+  account creation + full onboarding dance, (c) HTTP `/signup/api/crosssign`
+  for Paste B cross-signing bootstrap)
 
 **Two kinds of community access:**
 - *Invite code* — `/join?code=X`. Federates a guest in; they bring their

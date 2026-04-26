@@ -8,9 +8,12 @@ This is a **specific instance**, not a generic example — for the example, see
 
 - Custom landing page at `/` and per-invite `/join?code=…` page (served by a
   small nginx sidecar in front of continuwuity)
-- `knock-approver`: a tiny Python service that auto-approves Matrix `knock`
-  events on the Shape Rotator space when the knock `reason` matches a code
-  in `/data/codes.json`
+- `knock-approver`: a tiny Python service. When a Matrix `knock` on the
+  Shape Rotator space carries a `reason` matching a code in `/data/codes.json`,
+  the approver creates a fresh **per-knock vetting room**, invites the
+  knocker into it, and posts a wikipedia-fact haiku captcha. Only after
+  the knocker replies with a valid haiku does the approver invite them to
+  the space proper.
 - dstack-ingress with Namecheap DNS-01 Let's Encrypt for the custom domain
 
 ## Layout
@@ -25,10 +28,14 @@ landing/
   nginx.conf          routes / /join /signup to static files, /signup/api to the
                       approver service, everything else to continuwuity
 knock-approver/
-  approver.py         two jobs: (a) long-polls /sync and approves knocks whose
-                      reason matches /data/codes.json; (b) aiohttp.web server
-                      on :8001 exposing POST /signup/api which validates a code
-                      from /data/signup_codes.json, calls continuwuity register
+  approver.py         two jobs: (a) long-polls /sync — when a knock matches
+                      /data/codes.json it creates a per-knock vetting room
+                      (state in /data/vetting.json), posts a wikipedia haiku
+                      captcha, and invites the knocker to the space only after
+                      they reply with a valid 3-line haiku containing the
+                      keyword; (b) aiohttp.web server on :8001 exposing POST
+                      /signup/api which validates a code from
+                      /data/signup_codes.json, calls continuwuity register
                       with the server-side CONDUWUIT_REGISTRATION_TOKEN, and
                       auto-invites the new user to the space
 skills/
@@ -97,11 +104,22 @@ the CVM (SSH + docker exec) to add more.
    Rotator in Element" button.
 3. Element opens on `matrix.to/#/#shape-rotator:mtrx.shaperotator.xyz` →
    they click "Request to join" and paste the code as the reason.
-4. `knock-approver` sees the knock in the next `/sync` batch, matches the
-   code against `/data/codes.json`, and POSTs `/invite` → the user gets an
-   invite in their client.
-5. Accepting the invite joins the space; the `restricted` rule on child
-   rooms lets them auto-join General / Announcements / Bot Noise.
+4. `knock-approver` sees the knock in the next `/sync` batch and matches
+   the code against `/data/codes.json`. Instead of inviting straight to
+   the space, it creates a fresh **per-knock vetting room** and invites
+   only the knocker, then posts a captcha: "write a 3-line haiku about
+   *<random Wikipedia article title>*; include the word *<keyword>*."
+5. The user accepts the vetting-room invite, sets their Element
+   displayname (the bot uses it as their handle), and replies with a
+   haiku. The approver checks: 3 non-empty lines, 30–400 chars, contains
+   the required keyword. They get up to `VETTING_MAX_TRIES` attempts
+   (default 3); on success the approver invites them to the actual
+   space, on failure the bot leaves and the room dies.
+6. Accepting the space invite joins them in; the `restricted` rule on
+   child rooms lets them auto-join General / Announcements / Bot Noise.
+
+Stale, un-promoted vetting rooms are abandoned by the bot after
+`VETTING_TIMEOUT_SEC` (default 7200 = 2 h).
 
 ## Managing invite codes
 
