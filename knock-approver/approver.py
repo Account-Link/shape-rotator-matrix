@@ -374,28 +374,78 @@ def _new_code():
 
 
 async def cmd_mint(session, room_id, sender, args):
-    """!mint [knock|signup] [label]  — generate a new single-use code."""
-    parts = args.split(maxsplit=1)
-    kind = "knock"
-    if parts and parts[0] in ("knock", "signup"):
-        kind = parts.pop(0)
-    label = parts[0] if parts else f"minted by {sender}"
+    """!mint [knock|signup] [-n N] [--uses U] [label]  — generate codes.
 
-    code = _new_code()
+    -n N        number of distinct codes (default 1)
+    --uses U    uses_remaining per code (default 1)
+
+    Examples:
+      !mint                          one knock code, single use
+      !mint -n 10                    ten knock codes, single use each (one per person)
+      !mint --uses 10                one knock code, usable 10 times (shareable link)
+      !mint signup batch-A           one signup code, labelled
+      !mint -n 5 signup cohort1      five signup codes labelled "cohort1"
+      !mint --uses 20 open-house     one knock code, 20 uses, labelled "open-house"
+    """
+    def _parse_int(flag, raw):
+        try:
+            return int(raw), None
+        except ValueError:
+            return None, f"!mint: {flag} needs a number, got {raw!r}"
+
+    parts = args.split() if args else []
+    kind = "knock"
+    n = 1
+    uses = 1
+    label_parts = []
+    i = 0
+    while i < len(parts):
+        p = parts[i]
+        if p in ("knock", "signup") and not label_parts:
+            kind = p
+        elif p in ("-n", "--n") and i + 1 < len(parts):
+            n, err = _parse_int("-n", parts[i + 1])
+            if err: return err
+            i += 1
+        elif p.startswith("-n=") or p.startswith("--n="):
+            n, err = _parse_int("-n", p.split("=", 1)[1])
+            if err: return err
+        elif p == "--uses" and i + 1 < len(parts):
+            uses, err = _parse_int("--uses", parts[i + 1])
+            if err: return err
+            i += 1
+        elif p.startswith("--uses="):
+            uses, err = _parse_int("--uses", p.split("=", 1)[1])
+            if err: return err
+        else:
+            label_parts.append(p)
+        i += 1
+    if n < 1 or n > 50:
+        return f"!mint: -n must be 1..50, got {n}"
+    if uses < 1 or uses > 1000:
+        return f"!mint: --uses must be 1..1000, got {uses}"
+    label = " ".join(label_parts) or f"minted by {sender}"
+
     path = SIGNUP_PATH if kind == "signup" else CODES_PATH
     codes = _load(path)
-    if code in codes:
-        code = _new_code() + secrets.token_hex(2)
-    codes[code] = {"uses_remaining": 1, "label": label}
+    minted = []
+    for _ in range(n):
+        code = _new_code()
+        while code in codes:
+            code = _new_code() + secrets.token_hex(2)
+        codes[code] = {"uses_remaining": uses, "label": label}
+        minted.append(code)
     _save(path, codes)
-    audit({"type": "admin_mint", "kind": kind, "code": code,
-           "minted_by": sender, "label": label})
+    audit({"type": "admin_mint", "kind": kind, "n": n, "uses": uses,
+           "minted_by": sender, "label": label, "codes": minted})
 
-    if kind == "signup":
-        url = f"{HS_PUBLIC}/signup?code={code}"
-    else:
-        url = f"{HS_PUBLIC}/join?code={code}"
-    return f"minted {kind} code → {url}\n(label: {label})"
+    base = f"{HS_PUBLIC}/{'signup' if kind == 'signup' else 'join'}?code="
+    uses_tag = "" if uses == 1 else f", {uses} uses each" if n > 1 else f", {uses} uses"
+    if n == 1:
+        return f"minted {kind} code → {base}{minted[0]}\n(label: {label}{uses_tag})"
+    lines = [f"minted {n} {kind} codes (label: {label}{uses_tag}):"]
+    lines.extend(f"  {base}{c}" for c in minted)
+    return "\n".join(lines)
 
 
 async def cmd_codes(session, room_id, sender, args):
