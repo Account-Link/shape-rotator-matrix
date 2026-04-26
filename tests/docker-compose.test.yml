@@ -58,7 +58,10 @@ services:
         grep -v '^#' /shared/test.env | sed 's/=.*/=<redacted>/'
 
   knock-approver:
-    image: python:3.11-slim
+    # Reuse the test-runner image — it has libolm + mautrix preinstalled, so
+    # the approver's mautrix-based sync loop starts up in seconds rather
+    # than waiting on apt-get + pip install.
+    build: .
     depends_on:
       bootstrap:
         condition: service_completed_successfully
@@ -83,7 +86,7 @@ services:
         # rather than 2 hours.
         export VETTING_TIMEOUT_SEC=300
         export HTTP_PORT=8001
-        pip install --quiet aiohttp cryptography
+        export CRYPTO_DB=/data/bot_crypto.db
         exec python -u /app.py
 
   landing:

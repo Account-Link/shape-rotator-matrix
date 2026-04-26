@@ -33,6 +33,27 @@ from aiohttp import web
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+# mautrix is the E2EE-aware Matrix client. Keep the imports top-level so a
+# missing dep blows up at process start (with a clear traceback) rather
+# than mid-sync. The HTTP /signup/api endpoint also runs in this process
+# and uses raw aiohttp — those flows don't need mautrix.
+from mautrix.api import HTTPAPI as _MAU_HTTPAPI
+from mautrix.client import Client as _MAU_Client
+from mautrix.client.state_store import (
+    MemoryStateStore as _MAU_MemoryStateStore,
+    MemorySyncStore as _MAU_MemorySyncStore,
+)
+from mautrix.types import (
+    UserID as _MAU_UserID,
+    EventType as _MAU_EventType,
+    MessageType as _MAU_MessageType,
+    TextMessageEventContent as _MAU_TextContent,
+    TrustState as _MAU_TrustState,
+)
+from mautrix.crypto import OlmMachine as _MAU_OlmMachine
+from mautrix.crypto.store.asyncpg import PgCryptoStore as _MAU_PgCryptoStore
+from mautrix.util.async_db import Database as _MAU_Database
+
 HS            = os.environ["HS"].rstrip("/")
 # Public-facing URL returned to signup clients (the client needs to point Element
 # at the public name, not the internal docker hostname).
@@ -45,6 +66,9 @@ SIGNUP_PATH   = Path(os.environ.get("SIGNUP_CODES_PATH", "/data/signup_codes.jso
 LOG_PATH      = Path(os.environ.get("LOG_PATH",          "/data/log.jsonl"))
 SYNC_STATE    = Path(os.environ.get("SYNC_STATE",        "/data/sync_since.txt"))
 HTTP_PORT     = int(os.environ.get("HTTP_PORT", "8001"))
+# Bot's E2EE crypto store (megolm sessions, identity keys, peer device keys).
+# Lives on the same /data volume so it survives container restarts.
+CRYPTO_DB     = Path(os.environ.get("CRYPTO_DB", "/data/bot_crypto.db"))
 
 # Comma-separated list of space-child room IDs that a freshly-signed-up user
 # should auto-join via the restricted rule. Typically: general, announcements,
@@ -130,14 +154,13 @@ async def _fetch_wiki_challenge():
     return title, keyword
 
 
-async def _send_msg(session, room_id, text):
-    txn = f"m{int(time.time()*1000)}-{os.urandom(2).hex()}"
-    url = f"{HS}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{txn}"
-    async with session.put(url, json={"msgtype": "m.text", "body": text}) as r:
-        return r.status
+async def _send_msg(client, room_id, text):
+    """Send a plain text message. Auto-encrypts if room has m.room.encryption."""
+    content = _MAU_TextContent(msgtype=_MAU_MessageType.TEXT, body=text)
+    return await client.send_message_event(room_id, _MAU_EventType.ROOM_MESSAGE, content)
 
 
-async def _create_vetting_room(session, mxid):
+async def _create_vetting_room(client, mxid):
     body = {
         "preset": "private_chat",   # creator PL 100, invitee PL 0
         "invite": [mxid],
@@ -145,10 +168,11 @@ async def _create_vetting_room(session, mxid):
         "name":  f"shape-rotator vetting · {mxid}",
         "topic": "captcha airlock — answer the challenge to be invited to the space.",
     }
-    async with session.post(f"{HS}/_matrix/client/v3/createRoom", json=body) as r:
-        if r.status != 200:
-            return None, await r.text()
-        return (await r.json())["room_id"], None
+    try:
+        resp = await client.api.request("POST", "/_matrix/client/v3/createRoom", content=body)
+        return resp["room_id"], None
+    except Exception as e:
+        return None, str(e)[:300]
 
 
 def _vet(displayname, message, keyword):
@@ -165,14 +189,35 @@ def _vet(displayname, message, keyword):
     return True, "ok"
 
 
-async def _promote(session, mxid):
-    url = f"{HS}/_matrix/client/v3/rooms/{SPACE_ID}/invite"
-    async with session.post(url,
-                            json={"user_id": mxid, "reason": "vetted via airlock"}) as r:
-        return r.status, await r.text()
+async def _promote(client, mxid):
+    try:
+        await client.api.request("POST",
+            f"/_matrix/client/v3/rooms/{SPACE_ID}/invite",
+            content={"user_id": mxid, "reason": "vetted via airlock"})
+        return 200, ""
+    except Exception as e:
+        return getattr(e, "http_status", 500), str(e)[:300]
 
 
-async def handle_knock(session, room_id, user_id, reason):
+async def _kick(client, room_id, user_id, reason="auto"):
+    try:
+        await client.api.request("POST",
+            f"/_matrix/client/v3/rooms/{room_id}/kick",
+            content={"user_id": user_id, "reason": reason})
+    except Exception as e:
+        print(f"[kick failed] {user_id} from {room_id}: {e}", flush=True)
+
+
+async def _leave(client, room_id, reason="auto"):
+    try:
+        await client.api.request("POST",
+            f"/_matrix/client/v3/rooms/{room_id}/leave",
+            content={"reason": reason})
+    except Exception as e:
+        print(f"[leave failed] {room_id}: {e}", flush=True)
+
+
+async def handle_knock(client, room_id, user_id, reason):
     code = (reason or "").strip()
     codes = _load(CODES_PATH)
     entry = codes.get(code)
@@ -182,7 +227,7 @@ async def handle_knock(session, room_id, user_id, reason):
         return
 
     title, keyword = await _fetch_wiki_challenge()
-    vroom, err = await _create_vetting_room(session, user_id)
+    vroom, err = await _create_vetting_room(client, user_id)
     if not vroom:
         audit({"type": "vetting_room_failed", "user": user_id,
                "code": code, "err": (err or "")[:200]})
@@ -201,7 +246,7 @@ async def handle_knock(session, room_id, user_id, reason):
     }
     _save(VETTING_PATH, state)
 
-    await _send_msg(session, vroom,
+    await _send_msg(client, vroom,
         f"hi {user_id} — quick captcha to keep bots out of shape rotator.\n\n"
         f"write a 3-line haiku about: {title}\n"
         f"include the word \"{keyword}\" somewhere.\n"
@@ -245,7 +290,7 @@ def iter_vetting_rooms(rooms_data, vetting_state):
         yield room_id, meta, join_ev, msgs
 
 
-async def process_vetting_room(session, room_id, meta, join_ev, msgs):
+async def process_vetting_room(client, room_id, meta, join_ev, msgs):
     """Process new messages in one vetting room. Returns updated meta or None."""
     # Persist displayname the first time we see the user's join event — Matrix
     # /sync returns the join event in one batch and the user's later messages
@@ -260,16 +305,16 @@ async def process_vetting_room(session, room_id, meta, join_ev, msgs):
         text = (msg.get("content") or {}).get("body", "")
         ok, why = _vet(displayname, text, keyword)
         if ok:
-            st, body = await _promote(session, meta["mxid"])
+            st, body = await _promote(client, meta["mxid"])
             if st == 200:
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["displayname"] = displayname
-                await _send_msg(session, room_id,
+                await _send_msg(client, room_id,
                     "nice — invited you to shape rotator. you can leave this room.")
                 # Relay the captcha + haiku to FEED_ROOM so the rest of
                 # the community sees who joined and gets to enjoy their
-                # haiku. Uses raw HTTP so FEED_ROOM must be cleartext.
+                # haiku. send_message_event auto-encrypts if FEED_ROOM is E2EE.
                 if FEED_ROOM:
                     haiku_lines = [f"> {l}" for l in (text or "").strip().splitlines() if l.strip()]
                     relay = "\n".join([
@@ -278,7 +323,7 @@ async def process_vetting_room(session, room_id, meta, join_ev, msgs):
                         "",
                         *haiku_lines,
                     ])
-                    await _send_msg(session, FEED_ROOM, relay)
+                    await _send_msg(client, FEED_ROOM, relay)
                 audit({"type": "promoted", "user": meta["mxid"],
                        "displayname": displayname, "room": room_id,
                        "haiku": text, "title": meta.get("title"),
@@ -291,22 +336,19 @@ async def process_vetting_room(session, room_id, meta, join_ev, msgs):
             return meta
         meta["tries_left"] -= 1
         if meta["tries_left"] <= 0:
-            await _send_msg(session, room_id,
+            await _send_msg(client, room_id,
                 "out of tries. closing this room — get a fresh code and try again.")
-            async with session.post(
-                f"{HS}/_matrix/client/v3/rooms/{room_id}/leave",
-                json={"reason": "vetting failed"}) as r:
-                pass
+            await _leave(client, room_id, reason="vetting failed")
             meta["closed"] = True
             meta["closed_reason"] = "tries_exhausted"
             audit({"type": "vetting_failed", "user": meta["mxid"], "room": room_id})
             return meta
-        await _send_msg(session, room_id,
+        await _send_msg(client, room_id,
             f"not yet — {why}. {meta['tries_left']} tries left.")
     return meta
 
 
-async def cleanup_stale_vetting(session, vetting_state):
+async def cleanup_stale_vetting(client, vetting_state):
     """Leave vetting rooms older than VETTING_TIMEOUT. Returns True if state changed."""
     now = time.time()
     dirty = False
@@ -314,10 +356,7 @@ async def cleanup_stale_vetting(session, vetting_state):
         if meta.get("promoted") or meta.get("closed"):
             continue
         if now - meta.get("created", 0) > VETTING_TIMEOUT:
-            async with session.post(
-                f"{HS}/_matrix/client/v3/rooms/{vroom}/leave",
-                json={"reason": "vetting timeout"}) as r:
-                pass
+            await _leave(client, vroom, reason="vetting timeout")
             meta["closed"] = True
             meta["closed_reason"] = "timeout"
             audit({"type": "vetting_timeout", "user": meta["mxid"], "room": vroom})
@@ -349,49 +388,34 @@ FEED_ROOM = os.environ.get("FEED_ROOM") or ADMIN_COMMAND_ROOM
 OUR_MXID = ""
 
 
-async def _whoami(session):
-    async with session.get(f"{HS}/_matrix/client/v3/account/whoami") as r:
-        if r.status != 200:
-            raise RuntimeError(f"whoami: {r.status} {(await r.text())[:200]}")
-        return (await r.json())["user_id"]
+async def _whoami(client):
+    resp = await client.api.request("GET", "/_matrix/client/v3/account/whoami")
+    return resp["user_id"], resp.get("device_id", "")
 
 
-async def _get_user_pl(session, room_id, mxid):
-    url = f"{HS}/_matrix/client/v3/rooms/{room_id}/state/m.room.power_levels"
-    async with session.get(url) as r:
-        if r.status != 200:
-            return 0
-        pl = await r.json()
+async def _get_user_pl(client, room_id, mxid):
+    try:
+        pl = await client.api.request("GET",
+            f"/_matrix/client/v3/rooms/{room_id}/state/m.room.power_levels")
+    except Exception:
+        return 0
     users = pl.get("users") or {}
     if mxid in users:
         return int(users[mxid])
     return int(pl.get("users_default", 0))
 
 
-async def _is_admin(session, room_id, sender):
+async def _is_admin(client, room_id, sender):
     if sender in ADMIN_ALLOWLIST:
         return True
-    return (await _get_user_pl(session, room_id, sender)) >= ADMIN_PL_THRESHOLD
-
-
-def iter_admin_commands(rooms_data, admin_room_id):
-    rd = rooms_data.get("join", {}).get(admin_room_id)
-    if not rd:
-        return
-    for ev in rd.get("timeline", {}).get("events", []):
-        if ev.get("type") != "m.room.message":
-            continue
-        body = ((ev.get("content") or {}).get("body", "") or "").strip()
-        if not body.startswith("!"):
-            continue
-        yield ev.get("event_id", ""), ev.get("sender", ""), body
+    return (await _get_user_pl(client, room_id, sender)) >= ADMIN_PL_THRESHOLD
 
 
 def _new_code():
     return secrets.token_urlsafe(6).rstrip("=").replace("_", "").replace("-", "")[:9] or secrets.token_hex(4)
 
 
-async def cmd_mint(session, room_id, sender, args):
+async def cmd_mint(client, room_id, sender, args):
     """!mint [knock|signup] [-n N] [--uses U] [label]  — generate codes.
 
     -n N        number of distinct codes (default 1)
@@ -466,7 +490,7 @@ async def cmd_mint(session, room_id, sender, args):
     return "\n".join(lines)
 
 
-async def cmd_codes(session, room_id, sender, args):
+async def cmd_codes(client, room_id, sender, args):
     """!codes — list current valid codes."""
     out = []
     for label_name, p in (("knock", CODES_PATH), ("signup", SIGNUP_PATH)):
@@ -480,7 +504,7 @@ async def cmd_codes(session, room_id, sender, args):
     return "\n".join(out) if out else "no live codes."
 
 
-async def cmd_revoke(session, room_id, sender, args):
+async def cmd_revoke(client, room_id, sender, args):
     """!revoke <code> — zero out a code's uses_remaining."""
     code = args.strip()
     if not code:
@@ -503,14 +527,14 @@ COMMANDS = {
     "!help": None,  # filled below
 }
 
-async def cmd_help(session, room_id, sender, args):
+async def cmd_help(client, room_id, sender, args):
     return ("commands: " +
             ", ".join(sorted(c for c in COMMANDS if c != "!help")) +
             ", !help")
 COMMANDS["!help"] = cmd_help
 
 
-async def process_admin_command(session, room_id, event_id, sender, body):
+async def process_admin_command(client, room_id, event_id, sender, body):
     if not OUR_MXID:
         # /whoami failed at startup; refuse to process anything to avoid
         # ever responding to our own replies (which would loop).
@@ -523,69 +547,171 @@ async def process_admin_command(session, room_id, event_id, sender, body):
     handler = COMMANDS.get(cmd)
     if not handler:
         return
-    if not await _is_admin(session, room_id, sender):
-        await _send_msg(session, room_id,
+    is_admin = await _is_admin(client, room_id, sender)
+    print(f"[admin] dispatch {cmd} from {sender} is_admin={is_admin}", flush=True)
+    if not is_admin:
+        await _send_msg(client, room_id,
             f"{sender}: refused — need PL >= {ADMIN_PL_THRESHOLD} or be on the allowlist")
         audit({"type": "admin_refused", "cmd": cmd, "sender": sender})
         return
     try:
-        result = await handler(session, room_id, sender, args)
+        result = await handler(client, room_id, sender, args)
     except Exception as e:
         result = f"!{cmd[1:]} failed: {type(e).__name__}: {e}"
         print(f"[admin] {cmd} crashed: {e}", flush=True)
-    await _send_msg(session, room_id, result)
+    print(f"[admin] sending reply: {result[:120]!r}", flush=True)
+    await _send_msg(client, room_id, result)
+
+
+# Helper for OlmMachine. Tracks which rooms we're joined to so the
+# crypto state store can answer find_shared_rooms.
+class _StateStore:
+    def __init__(self, inner):
+        self._inner, self._joined = inner, set()
+    async def is_encrypted(self, rid):
+        return (await self.get_encryption_info(rid)) is not None
+    async def get_encryption_info(self, rid):
+        if hasattr(self._inner, "get_encryption_info"):
+            return await self._inner.get_encryption_info(rid)
+        return None
+    async def find_shared_rooms(self, uid):
+        return list(self._joined)
 
 
 async def sync_loop():
+    """Mautrix-based sync loop with full E2EE support.
+
+    Replaces the previous raw-HTTP /sync. Mautrix decrypts incoming
+    encrypted events in place via OlmMachine, and our send_message_event
+    calls auto-encrypt outbound to any room with m.room.encryption set.
+
+    Cleartext flows (knock events on the space, vetting rooms) keep
+    working unchanged — iter_knock_events and iter_vetting_rooms read
+    raw event dicts which mautrix returns in the same shape.
+
+    Admin commands route through an event-handler so the bot processes
+    DECRYPTED versions even when ADMIN_COMMAND_ROOM is E2EE.
+    """
     global OUR_MXID
-    since = SYNC_STATE.read_text().strip() if SYNC_STATE.exists() else None
-    timeout = aiohttp.ClientTimeout(total=None, sock_read=45)
-    async with aiohttp.ClientSession(headers=AUTH, timeout=timeout) as s:
+
+    api = _MAU_HTTPAPI(base_url=HS, token=TOKEN)
+    state_store = _MAU_MemoryStateStore()
+    sync_store_obj = _MAU_MemorySyncStore()
+
+    # Resolve our identity via /whoami before the Client constructor
+    # (mautrix needs mxid + device_id baked in).
+    try:
+        whoami = await api.request("GET", "/_matrix/client/v3/account/whoami")
+        OUR_MXID = whoami["user_id"]
+        device_id = whoami.get("device_id", "approver")
+    except Exception as e:
+        print(f"[startup] whoami failed: {e}", flush=True)
+        # Fall through with empty mxid; admin commands will refuse.
+        OUR_MXID = ""
+        device_id = "approver-fallback"
+
+    client = _MAU_Client(mxid=_MAU_UserID(OUR_MXID or "@unknown:localhost"),
+                         device_id=device_id, api=api,
+                         state_store=state_store, sync_store=sync_store_obj)
+
+    CRYPTO_DB.parent.mkdir(parents=True, exist_ok=True)
+    db = _MAU_Database.create(f"sqlite:///{CRYPTO_DB}",
+                               upgrade_table=_MAU_PgCryptoStore.upgrade_table)
+    await db.start()
+    cs = _MAU_PgCryptoStore(account_id=OUR_MXID or "approver",
+                             pickle_key=f"{OUR_MXID}:{device_id}", db=db)
+    await cs.open()
+    ss = _StateStore(state_store)
+    olm = _MAU_OlmMachine(client, cs, ss)
+    olm.share_keys_min_trust = _MAU_TrustState.UNVERIFIED
+    olm.send_keys_min_trust = _MAU_TrustState.UNVERIFIED
+    await olm.load()
+    client.crypto = olm
+    client.crypto_store = cs
+
+    # Queue admin-command events as they arrive (mautrix decrypts before
+    # invoking handlers). Drained once per sync cycle below.
+    admin_queue = asyncio.Queue()
+
+    async def on_room_message(evt):
         try:
-            OUR_MXID = await _whoami(s)
-            print(f"[startup] running as {OUR_MXID}; admin room={ADMIN_COMMAND_ROOM}; "
-                  f"allowlist={sorted(ADMIN_ALLOWLIST) or '(empty)'}", flush=True)
+            ev_room = str(evt.room_id)
+            ev_sender = str(evt.sender)
+            if ev_room != ADMIN_COMMAND_ROOM:
+                return
+            if ev_sender == OUR_MXID:
+                return
+            body = (getattr(evt.content, "body", "") or "").strip()
+            if not body.startswith("!"):
+                return
+            await admin_queue.put((str(evt.event_id), ev_sender, body))
         except Exception as e:
-            print(f"[startup] whoami failed: {e}", flush=True)
-        while True:
-            params = {"timeout": "30000"}
-            if since:
-                params["since"] = since
-            try:
-                async with s.get(f"{HS}/_matrix/client/v3/sync", params=params) as r:
-                    if r.status != 200:
-                        print(f"[sync {r.status}] {(await r.text())[:300]}", flush=True)
-                        await asyncio.sleep(5)
-                        continue
-                    data = await r.json()
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                print(f"[sync error] {type(e).__name__}: {e}", flush=True)
-                await asyncio.sleep(5)
-                continue
-            since = data["next_batch"]
+            print(f"[admin handler] {type(e).__name__}: {e}", flush=True)
+
+    client.add_event_handler(_MAU_EventType.ROOM_MESSAGE, on_room_message)
+
+    try:
+        await client.crypto.share_keys()
+    except Exception as e:
+        print(f"[startup] share_keys failed (continuing): {e}", flush=True)
+
+    print(f"[startup] running as {OUR_MXID}; device={device_id}; "
+          f"admin room={ADMIN_COMMAND_ROOM}; "
+          f"allowlist={sorted(ADMIN_ALLOWLIST) or '(empty)'}", flush=True)
+
+    since = SYNC_STATE.read_text().strip() if SYNC_STATE.exists() else None
+
+    while True:
+        try:
+            data = await client.sync(since=since, timeout=30000)
+        except Exception as e:
+            print(f"[sync error] {type(e).__name__}: {e}", flush=True)
+            await asyncio.sleep(5)
+            continue
+        if not isinstance(data, dict):
+            continue
+        next_batch = data.get("next_batch")
+        if next_batch:
+            since = next_batch
             SYNC_STATE.write_text(since)
 
-            for room_id, user_id, reason in iter_knock_events(data.get("rooms", {})):
-                await handle_knock(s, room_id, user_id, reason)
+        # Update joined-rooms tracking so OlmMachine can answer find_shared_rooms.
+        ss._joined.clear()
+        ss._joined.update(data.get("rooms", {}).get("join", {}).keys())
 
-            vetting_state = _load(VETTING_PATH)
-            v_dirty = False
-            for vroom, meta, join_ev, msgs in iter_vetting_rooms(
-                    data.get("rooms", {}), vetting_state):
-                updated = await process_vetting_room(s, vroom, meta, join_ev, msgs)
-                if updated is not None:
-                    vetting_state[vroom] = updated
-                    v_dirty = True
-            if await cleanup_stale_vetting(s, vetting_state):
+        # Decrypt + dispatch event handlers (this populates admin_queue).
+        try:
+            tasks = client.handle_sync(data)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"[handle_sync error] {type(e).__name__}: {e}", flush=True)
+
+        # Cleartext flows — knock events on the space + vetting rooms.
+        for room_id, user_id, reason in iter_knock_events(data.get("rooms", {})):
+            await handle_knock(client, room_id, user_id, reason)
+
+        vetting_state = _load(VETTING_PATH)
+        v_dirty = False
+        for vroom, meta, join_ev, msgs in iter_vetting_rooms(
+                data.get("rooms", {}), vetting_state):
+            updated = await process_vetting_room(client, vroom, meta, join_ev, msgs)
+            if updated is not None:
+                vetting_state[vroom] = updated
                 v_dirty = True
-            if v_dirty:
-                _save(VETTING_PATH, vetting_state)
+        if await cleanup_stale_vetting(client, vetting_state):
+            v_dirty = True
+        if v_dirty:
+            _save(VETTING_PATH, vetting_state)
 
-            for ev_id, sender, body in iter_admin_commands(
-                    data.get("rooms", {}), ADMIN_COMMAND_ROOM):
-                await process_admin_command(s, ADMIN_COMMAND_ROOM, ev_id, sender, body)
+        # Drain queued admin commands (event handler may have populated
+        # them with decrypted message events).
+        while not admin_queue.empty():
+            try:
+                ev_id, sender, body = admin_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await process_admin_command(client, ADMIN_COMMAND_ROOM, ev_id, sender, body)
 
 
 # --- Signup auth proxy ---

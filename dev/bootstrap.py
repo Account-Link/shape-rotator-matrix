@@ -272,6 +272,11 @@ def main():
     # server's returned string; don't normalize.
     echo(f"export SPACE_ID={space_id!r}")
     echo(f"export SPACE_CHILD_IDS={','.join(child_ids)!r}")
+    # Designate the last (encrypted) child room as the admin command room
+    # for tests. The migrated mautrix-based bot decrypts admin commands
+    # there; admin_e2ee.py exercises that path.
+    if child_ids:
+        echo(f"export ADMIN_COMMAND_ROOM={child_ids[-1]!r}")
     echo(f"export CONDUWUIT_REGISTRATION_TOKEN={REG_TOKEN!r}")
     echo(f"export ONBOARDING_INVITER_MXID={admin_mxid!r}")
     echo(f"export INITIAL_CODES={knock_seed!r}")
