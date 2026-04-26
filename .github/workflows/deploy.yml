@@ -62,6 +62,7 @@ jobs:
           INITIAL_CODES: ${{ secrets.INITIAL_CODES }}
           INITIAL_SIGNUP_CODES: ${{ secrets.INITIAL_SIGNUP_CODES }}
           ADMIN_ALLOWLIST: ${{ secrets.ADMIN_ALLOWLIST }}
+          ADMIN_COMMAND_ROOM: ${{ secrets.ADMIN_COMMAND_ROOM }}
         run: |
           {
             echo "NAMECHEAP_USERNAME=$NAMECHEAP_USERNAME"
@@ -75,6 +76,7 @@ jobs:
             echo "INITIAL_CODES=$INITIAL_CODES"
             echo "INITIAL_SIGNUP_CODES=$INITIAL_SIGNUP_CODES"
             echo "ADMIN_ALLOWLIST=$ADMIN_ALLOWLIST"
+            echo "ADMIN_COMMAND_ROOM=$ADMIN_COMMAND_ROOM"
           } > .env
           bash deploy/encode_env.sh
 
