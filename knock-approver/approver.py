@@ -311,10 +311,174 @@ async def cleanup_stale_vetting(session, vetting_state):
     return dirty
 
 
+# --- Admin commands (!mint / !codes / !revoke) ---
+#
+# Admin chat surface so adding/listing/revoking codes doesn't require ssh.
+# The bot listens in ADMIN_COMMAND_ROOM (defaults to SPACE_ID — the space
+# room itself is cleartext, so raw-HTTP /sync can read commands there).
+# Tracked in issue #7; this is the v1 cut.
+
+ADMIN_COMMAND_ROOM = os.environ.get("ADMIN_COMMAND_ROOM", SPACE_ID)
+ADMIN_PL_THRESHOLD = int(os.environ.get("ADMIN_PL_THRESHOLD", "50"))
+# Comma-separated mxids allowed regardless of PL. Useful when you want to
+# delegate admin to someone whose PL hasn't been bumped yet.
+ADMIN_ALLOWLIST = set(
+    m.strip() for m in os.environ.get("ADMIN_ALLOWLIST", "").split(",") if m.strip()
+)
+
+# Filled at startup by /whoami so we can skip our own messages in the
+# command room (we'd otherwise process replies we just sent).
+OUR_MXID = ""
+
+
+async def _whoami(session):
+    async with session.get(f"{HS}/_matrix/client/v3/account/whoami") as r:
+        if r.status != 200:
+            raise RuntimeError(f"whoami: {r.status} {(await r.text())[:200]}")
+        return (await r.json())["user_id"]
+
+
+async def _get_user_pl(session, room_id, mxid):
+    url = f"{HS}/_matrix/client/v3/rooms/{room_id}/state/m.room.power_levels"
+    async with session.get(url) as r:
+        if r.status != 200:
+            return 0
+        pl = await r.json()
+    users = pl.get("users") or {}
+    if mxid in users:
+        return int(users[mxid])
+    return int(pl.get("users_default", 0))
+
+
+async def _is_admin(session, room_id, sender):
+    if sender in ADMIN_ALLOWLIST:
+        return True
+    return (await _get_user_pl(session, room_id, sender)) >= ADMIN_PL_THRESHOLD
+
+
+def iter_admin_commands(rooms_data, admin_room_id):
+    rd = rooms_data.get("join", {}).get(admin_room_id)
+    if not rd:
+        return
+    for ev in rd.get("timeline", {}).get("events", []):
+        if ev.get("type") != "m.room.message":
+            continue
+        body = ((ev.get("content") or {}).get("body", "") or "").strip()
+        if not body.startswith("!"):
+            continue
+        yield ev.get("event_id", ""), ev.get("sender", ""), body
+
+
+def _new_code():
+    return secrets.token_urlsafe(6).rstrip("=").replace("_", "").replace("-", "")[:9] or secrets.token_hex(4)
+
+
+async def cmd_mint(session, room_id, sender, args):
+    """!mint [knock|signup] [label]  — generate a new single-use code."""
+    parts = args.split(maxsplit=1)
+    kind = "knock"
+    if parts and parts[0] in ("knock", "signup"):
+        kind = parts.pop(0)
+    label = parts[0] if parts else f"minted by {sender}"
+
+    code = _new_code()
+    path = SIGNUP_PATH if kind == "signup" else CODES_PATH
+    codes = _load(path)
+    if code in codes:
+        code = _new_code() + secrets.token_hex(2)
+    codes[code] = {"uses_remaining": 1, "label": label}
+    _save(path, codes)
+    audit({"type": "admin_mint", "kind": kind, "code": code,
+           "minted_by": sender, "label": label})
+
+    if kind == "signup":
+        url = f"{HS_PUBLIC}/signup?code={code}"
+    else:
+        url = f"{HS_PUBLIC}/join?code={code}"
+    return f"minted {kind} code → {url}\n(label: {label})"
+
+
+async def cmd_codes(session, room_id, sender, args):
+    """!codes — list current valid codes."""
+    out = []
+    for label_name, p in (("knock", CODES_PATH), ("signup", SIGNUP_PATH)):
+        codes = _load(p)
+        live = {c: m for c, m in codes.items() if m.get("uses_remaining", 0) > 0}
+        if not live:
+            continue
+        out.append(f"{label_name}:")
+        for c, m in sorted(live.items()):
+            out.append(f"  {c} (uses={m.get('uses_remaining',0)}, label={m.get('label','')!r})")
+    return "\n".join(out) if out else "no live codes."
+
+
+async def cmd_revoke(session, room_id, sender, args):
+    """!revoke <code> — zero out a code's uses_remaining."""
+    code = args.strip()
+    if not code:
+        return "usage: !revoke <code>"
+    for p in (CODES_PATH, SIGNUP_PATH):
+        codes = _load(p)
+        if code in codes:
+            codes[code]["uses_remaining"] = 0
+            _save(p, codes)
+            audit({"type": "admin_revoke", "code": code, "revoked_by": sender,
+                   "in": p.name})
+            return f"revoked {code} (in {p.name})"
+    return f"unknown code: {code}"
+
+
+COMMANDS = {
+    "!mint": cmd_mint,
+    "!codes": cmd_codes,
+    "!revoke": cmd_revoke,
+    "!help": None,  # filled below
+}
+
+async def cmd_help(session, room_id, sender, args):
+    return ("commands: " +
+            ", ".join(sorted(c for c in COMMANDS if c != "!help")) +
+            ", !help")
+COMMANDS["!help"] = cmd_help
+
+
+async def process_admin_command(session, room_id, event_id, sender, body):
+    if not OUR_MXID:
+        # /whoami failed at startup; refuse to process anything to avoid
+        # ever responding to our own replies (which would loop).
+        return
+    if sender == OUR_MXID:
+        return
+    parts = body.split(maxsplit=1)
+    cmd = parts[0]
+    args = parts[1] if len(parts) > 1 else ""
+    handler = COMMANDS.get(cmd)
+    if not handler:
+        return
+    if not await _is_admin(session, room_id, sender):
+        await _send_msg(session, room_id,
+            f"{sender}: refused — need PL >= {ADMIN_PL_THRESHOLD} or be on the allowlist")
+        audit({"type": "admin_refused", "cmd": cmd, "sender": sender})
+        return
+    try:
+        result = await handler(session, room_id, sender, args)
+    except Exception as e:
+        result = f"!{cmd[1:]} failed: {type(e).__name__}: {e}"
+        print(f"[admin] {cmd} crashed: {e}", flush=True)
+    await _send_msg(session, room_id, result)
+
+
 async def sync_loop():
+    global OUR_MXID
     since = SYNC_STATE.read_text().strip() if SYNC_STATE.exists() else None
     timeout = aiohttp.ClientTimeout(total=None, sock_read=45)
     async with aiohttp.ClientSession(headers=AUTH, timeout=timeout) as s:
+        try:
+            OUR_MXID = await _whoami(s)
+            print(f"[startup] running as {OUR_MXID}; admin room={ADMIN_COMMAND_ROOM}; "
+                  f"allowlist={sorted(ADMIN_ALLOWLIST) or '(empty)'}", flush=True)
+        except Exception as e:
+            print(f"[startup] whoami failed: {e}", flush=True)
         while True:
             params = {"timeout": "30000"}
             if since:
@@ -350,6 +514,10 @@ async def sync_loop():
                 v_dirty = True
             if v_dirty:
                 _save(VETTING_PATH, vetting_state)
+
+            for ev_id, sender, body in iter_admin_commands(
+                    data.get("rooms", {}), ADMIN_COMMAND_ROOM):
+                await process_admin_command(s, ADMIN_COMMAND_ROOM, ev_id, sender, body)
 
 
 # --- Signup auth proxy ---

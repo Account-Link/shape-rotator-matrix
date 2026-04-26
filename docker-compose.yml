@@ -92,6 +92,11 @@ services:
       APPROVER_B64: ${APPROVER_B64}
       INITIAL_CODES: ${INITIAL_CODES}
       INITIAL_SIGNUP_CODES: ${INITIAL_SIGNUP_CODES}
+      # Admin command surface (issue #7). Empty values fall back to in-code
+      # defaults: ADMIN_COMMAND_ROOM=$SPACE_ID, ADMIN_PL_THRESHOLD=50.
+      ADMIN_COMMAND_ROOM: ${ADMIN_COMMAND_ROOM:-}
+      ADMIN_PL_THRESHOLD: ${ADMIN_PL_THRESHOLD:-50}
+      ADMIN_ALLOWLIST: ${ADMIN_ALLOWLIST:-}
     volumes:
       - knock-data:/data
     # Exposed on the internal docker network only; nginx proxies /signup/api
