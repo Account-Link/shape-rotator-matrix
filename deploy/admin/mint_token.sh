@@ -27,9 +27,12 @@ ENV_LOCAL="$REPO_ROOT/.env"
 
 PASSWORD="${SHAPE_ROTATOR_2_PASSWORD:-}"
 if [ -z "$PASSWORD" ]; then
-  echo "FAIL: set SHAPE_ROTATOR_2_PASSWORD env var first" >&2
-  echo "  e.g.  SHAPE_ROTATOR_2_PASSWORD='xxx' bash deploy/admin/mint_token.sh" >&2
-  exit 1
+  if [ ! -t 0 ]; then
+    echo "FAIL: SHAPE_ROTATOR_2_PASSWORD not set and stdin is not a TTY" >&2
+    exit 1
+  fi
+  read -rsp "shape-rotator-2 password: " PASSWORD
+  echo
 fi
 
 # --- 1. Login ---

@@ -6,3 +6,4 @@ deploy/deploy_key
 __pycache__/
 .claude/
 .DS_Store
+deploy/admin/.*-crypto.db
