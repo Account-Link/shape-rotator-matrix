@@ -318,7 +318,7 @@ async def cleanup_stale_vetting(session, vetting_state):
 # room itself is cleartext, so raw-HTTP /sync can read commands there).
 # Tracked in issue #7; this is the v1 cut.
 
-ADMIN_COMMAND_ROOM = os.environ.get("ADMIN_COMMAND_ROOM", SPACE_ID)
+ADMIN_COMMAND_ROOM = os.environ.get("ADMIN_COMMAND_ROOM") or SPACE_ID
 ADMIN_PL_THRESHOLD = int(os.environ.get("ADMIN_PL_THRESHOLD", "50"))
 # Comma-separated mxids allowed regardless of PL. Useful when you want to
 # delegate admin to someone whose PL hasn't been bumped yet.
