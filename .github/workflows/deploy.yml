@@ -31,6 +31,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      delay_seconds:
+        description: 'Seconds to wait between heads-up post and CVM restart. Tag pushes use the default; manual dispatches can pick a longer window for planned downtime.'
+        required: false
+        default: '600'
 
 concurrency:
   group: deploy-prod
@@ -43,7 +48,7 @@ jobs:
   deploy:
     needs: e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -84,6 +89,53 @@ jobs:
             echo "ADMIN_COMMAND_ROOM=$ADMIN_COMMAND_ROOM"
           } > .env
           bash deploy/encode_env.sh
+
+      - name: pre-deploy heads-up + delay
+        env:
+          KNOCK_APPROVER_TOKEN: ${{ secrets.KNOCK_APPROVER_TOKEN }}
+          ADMIN_COMMAND_ROOM: ${{ secrets.ADMIN_COMMAND_ROOM }}
+          DELAY: ${{ inputs.delay_seconds || '600' }}
+          GH_SHA: ${{ github.sha }}
+          GH_REF: ${{ github.ref_name }}
+          GH_RUN: ${{ github.run_id }}
+          GH_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Post a "deploying in N seconds — expect ~2 min downtime"
+          # message to ADMIN_COMMAND_ROOM, then sleep $DELAY before phala
+          # deploy fires. Lets anyone in the room cancel the run if the
+          # timing is bad. No-op if the secrets aren't configured.
+          if [ -z "${ADMIN_COMMAND_ROOM:-}" ] || [ -z "${KNOCK_APPROVER_TOKEN:-}" ]; then
+            echo "no notification room configured; skipping heads-up + delay"
+            exit 0
+          fi
+          SHORT="${GH_SHA:0:7}"
+          MIN=$((DELAY / 60))
+          ROOM_ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$ADMIN_COMMAND_ROOM")
+          BODY=$(SHORT="$SHORT" MIN="$MIN" python3 - <<'PY'
+          import json, os
+          short = os.environ['SHORT']
+          minutes = os.environ['MIN']
+          ref = os.environ.get('GH_REF', '?')
+          msg = os.environ.get('GH_MSG', '(no commit message)')
+          run = os.environ.get('GH_RUN', '?')
+          delay = os.environ.get('DELAY', '?')
+          body = (
+            f"🚧 deploying {ref} ({short}) in ~{minutes} min — "
+            f"mtrx.shaperotator.xyz briefly unreachable while the CVM restarts.\n\n"
+            f"{msg}\n\n"
+            f"to cancel: https://github.com/Account-Link/shape-rotator-matrix/actions/runs/{run}"
+          )
+          print(json.dumps({"msgtype": "m.text", "body": body}))
+          PY
+          )
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer $KNOCK_APPROVER_TOKEN" \
+            -H 'Content-Type: application/json' \
+            "https://mtrx.shaperotator.xyz/_matrix/client/v3/rooms/$ROOM_ENC/send/m.room.message/predeploy-$GH_RUN" \
+            -d "$BODY"
+          echo
+          echo "[delay] heads-up posted; sleeping ${DELAY}s before phala deploy"
+          sleep "$DELAY"
 
       - name: phala deploy
         env:
