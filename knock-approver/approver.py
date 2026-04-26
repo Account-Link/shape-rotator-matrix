@@ -267,8 +267,22 @@ async def process_vetting_room(session, room_id, meta, join_ev, msgs):
                 meta["displayname"] = displayname
                 await _send_msg(session, room_id,
                     "nice — invited you to shape rotator. you can leave this room.")
+                # Relay the captcha + haiku to FEED_ROOM so the rest of
+                # the community sees who joined and gets to enjoy their
+                # haiku. Uses raw HTTP so FEED_ROOM must be cleartext.
+                if FEED_ROOM:
+                    haiku_lines = [f"> {l}" for l in (text or "").strip().splitlines() if l.strip()]
+                    relay = "\n".join([
+                        f"🌸 {displayname or meta['mxid']} ({meta['mxid']}) joined Shape Rotator",
+                        f"captcha: write a haiku about \"{meta['title']}\" including the word \"{meta['keyword']}\"",
+                        "",
+                        *haiku_lines,
+                    ])
+                    await _send_msg(session, FEED_ROOM, relay)
                 audit({"type": "promoted", "user": meta["mxid"],
-                       "displayname": displayname, "room": room_id})
+                       "displayname": displayname, "room": room_id,
+                       "haiku": text, "title": meta.get("title"),
+                       "keyword": meta.get("keyword")})
                 print(f"[promoted] {meta['mxid']} ({displayname})", flush=True)
             else:
                 audit({"type": "promote_failed", "user": meta["mxid"],
@@ -325,6 +339,10 @@ ADMIN_PL_THRESHOLD = int(os.environ.get("ADMIN_PL_THRESHOLD", "50"))
 ADMIN_ALLOWLIST = set(
     m.strip() for m in os.environ.get("ADMIN_ALLOWLIST", "").split(",") if m.strip()
 )
+# Room to relay successful-vetting messages to. Default = the admin room
+# so #matrix-devops gets a "🌸 X joined" + their haiku each time. Set to
+# any other cleartext room id to redirect.
+FEED_ROOM = os.environ.get("FEED_ROOM") or ADMIN_COMMAND_ROOM
 
 # Filled at startup by /whoami so we can skip our own messages in the
 # command room (we'd otherwise process replies we just sent).
