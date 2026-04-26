@@ -26,7 +26,7 @@ State files on the knock-data volume:
   /data/log.jsonl           audit log
   /data/sync_since.txt      /sync cursor
 """
-import asyncio, base64, json, os, sys, time
+import asyncio, base64, json, os, secrets, sys, time
 from pathlib import Path
 import aiohttp
 from aiohttp import web
