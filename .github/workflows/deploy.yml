@@ -88,3 +88,32 @@ jobs:
             --compose docker-compose.yml \
             --env-file .env \
             --wait
+
+      - name: post deploy note to #matrix-devops
+        if: success()
+        env:
+          KNOCK_APPROVER_TOKEN: ${{ secrets.KNOCK_APPROVER_TOKEN }}
+          ADMIN_COMMAND_ROOM: ${{ secrets.ADMIN_COMMAND_ROOM }}
+          GH_SHA: ${{ github.sha }}
+          GH_MSG: ${{ github.event.head_commit.message }}
+          GH_RUN: ${{ github.run_id }}
+        run: |
+          if [ -z "${ADMIN_COMMAND_ROOM:-}" ] || [ -z "${KNOCK_APPROVER_TOKEN:-}" ]; then
+            echo "ADMIN_COMMAND_ROOM or KNOCK_APPROVER_TOKEN not set; skipping post"
+            exit 0
+          fi
+          ROOM_ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$ADMIN_COMMAND_ROOM")
+          BODY=$(python3 - <<'PY'
+          import json, os
+          sha = os.environ.get("GH_SHA", "")[:7]
+          msg = os.environ.get("GH_MSG", "(no commit message)")
+          run = os.environ.get("GH_RUN", "")
+          body = f"🚀 deployed {sha} to dstack-matrix\n\n{msg}\n\nrun: https://github.com/Account-Link/shape-rotator-matrix/actions/runs/{run}"
+          print(json.dumps({"msgtype": "m.text", "body": body}))
+          PY
+          )
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer $KNOCK_APPROVER_TOKEN" \
+            -H 'Content-Type: application/json' \
+            "https://mtrx.shaperotator.xyz/_matrix/client/v3/rooms/$ROOM_ENC/send/m.room.message/deploy-$GH_RUN" \
+            -d "$BODY"
