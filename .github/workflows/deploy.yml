@@ -22,9 +22,14 @@ name: deploy
 # The CVM ID `dstack-matrix` is the name on the Phala dashboard. Change it
 # below if the CVM is renamed or replaced.
 
+# Deploys are tag-triggered by design. Pushing to main no longer touches
+# prod — push a tag matching v* (e.g. `git tag v0.3 && git push --tags`)
+# to roll out, or use the "Run workflow" button (workflow_dispatch) for an
+# out-of-band deploy. This puts release timing in operator hands so a
+# routine README PR doesn't surprise the homeserver with a CVM recreate.
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 concurrency:
@@ -84,12 +89,69 @@ jobs:
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
         run: |
+          # phala deploy --wait polls for ~300s; if the Phala backend is
+          # slow it can leave the CVM `stopped` and exit nonzero. Don't
+          # let that strand prod — capture the rc, then if the CVM is
+          # stopped, kick it back up ourselves.
+          set +e
           phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
             --cvm-id dstack-matrix \
             --compose docker-compose.yml \
             --env-file .env \
             --wait
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::phala deploy --wait exited $rc; checking CVM status"
+            STATUS=$(phala cvms list --api-token "$PHALA_CLOUD_API_KEY" 2>&1 \
+              | awk '/dstack-matrix/{print $3; exit}')
+            echo "CVM status: $STATUS"
+            if [ "$STATUS" = "stopped" ] || [ "$STATUS" = "starting" ]; then
+              echo "::warning::CVM is $STATUS — issuing phala cvms start as recovery"
+              phala cvms start dstack-matrix --api-token "$PHALA_CLOUD_API_KEY"
+            fi
+            # Poll until running or fail hard (60 * 5s = 5 min ceiling).
+            for i in $(seq 1 60); do
+              STATUS=$(phala cvms list --api-token "$PHALA_CLOUD_API_KEY" 2>&1 \
+                | awk '/dstack-matrix/{print $3; exit}')
+              echo "[recovery $i/60] cvm: $STATUS"
+              [ "$STATUS" = "running" ] && break
+              sleep 5
+            done
+            if [ "$STATUS" != "running" ]; then
+              echo "::error::CVM still not running after recovery — manual intervention needed"
+              exit 1
+            fi
+          fi
+
+      - name: post-deploy health check
+        env:
+          KNOCK_APPROVER_TOKEN: ${{ secrets.KNOCK_APPROVER_TOKEN }}
+        run: |
+          # Fail loudly if the homeserver isn't actually serving traffic
+          # after deploy. Avoids declaring success when the CVM came up
+          # but continuwuity / nginx are wedged.
+          for i in $(seq 1 30); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              https://mtrx.shaperotator.xyz/_matrix/client/versions || true)
+            echo "[health $i/30] /versions=$code"
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::homeserver not returning 200 on /versions"
+            exit 1
+          fi
+          # Bot health: /whoami should return @shape-rotator-2.
+          who=$(curl -sS -H "Authorization: Bearer $KNOCK_APPROVER_TOKEN" \
+            https://mtrx.shaperotator.xyz/_matrix/client/v3/account/whoami \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('user_id','?'))")
+          echo "bot whoami: $who"
+          if [ "$who" != "@shape-rotator-2:mtrx.shaperotator.xyz" ]; then
+            echo "::error::bot token not authenticating as @shape-rotator-2"
+            exit 1
+          fi
 
       - name: post deploy note to #matrix-devops
         if: success()
