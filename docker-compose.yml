@@ -97,6 +97,10 @@ services:
       ADMIN_COMMAND_ROOM: ${ADMIN_COMMAND_ROOM:-}
       ADMIN_PL_THRESHOLD: ${ADMIN_PL_THRESHOLD:-50}
       ADMIN_ALLOWLIST: ${ADMIN_ALLOWLIST:-}
+      # Room to relay haikus + new-member announcements to. Empty defaults
+      # to ADMIN_COMMAND_ROOM (matrix-devops). Explicitly set to "" to
+      # disable the relay entirely.
+      FEED_ROOM: ${FEED_ROOM-}
     volumes:
       - knock-data:/data
     # Exposed on the internal docker network only; nginx proxies /signup/api
