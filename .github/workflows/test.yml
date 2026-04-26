@@ -1,0 +1,21 @@
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Reusable from deploy.yml so a deploy is gated on the same e2e test run.
+  workflow_call:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: full e2e stack
+        run: bash tests/run_e2e.sh
