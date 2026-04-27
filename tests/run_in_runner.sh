@@ -44,6 +44,18 @@ ADMIN_TOKEN="$ADMIN_TOKEN" \
   HOMESERVER="$HS" \
   python3 tests/smoke.py
 
+# Regression test for the space join_rule (Alexis incident, 2026-04-26 —
+# the space's join_rule had been flipped to `restricted` and external
+# users hit "you do not belong to any of the required rooms/spaces" when
+# clicking the public alias, which the existing tests didn't catch
+# because they only exercised local users with knock codes).
+echo "[runner] === space_join_rule_e2e.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  SPACE_ID="$SPACE_ID" \
+  ADMIN_TOKEN="$ADMIN_TOKEN" \
+  python3 tests/space_join_rule_e2e.py
+
 # Real E2EE round-trip test of the new vetting flow.
 echo "[runner] === vetting_e2e.py ==="
 DEV_HS="$HS" \
