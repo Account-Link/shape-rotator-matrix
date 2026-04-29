@@ -10,75 +10,83 @@
   body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; }
   h1 { margin: 0 0 .25rem; }
   .sub { color: #888; margin-top: 0; }
-  .code-box {
-    font-family: ui-monospace, monospace; font-size: 1.25rem; font-weight: 600;
-    background: #fffbea; border: 1px solid #e7d37a; border-radius: 8px;
-    padding: .9rem 1.2rem; margin: 1rem 0; letter-spacing: .08em;
-    word-break: break-all; user-select: all; cursor: pointer;
-  }
   .btn {
     display: inline-block; background: #0b7; color: white; padding: .7rem 1.1rem;
     border-radius: 8px; text-decoration: none; margin-top: .5rem; font-size: 1.05em;
   }
+  .btn[aria-disabled="true"] { background: #888; pointer-events: none; }
   ol li { margin: .5rem 0; }
   code { background: #f3f3f3; padding: .1rem .35rem; border-radius: 4px; }
   .missing { color: #a33; }
+  .status { color: #888; font-size: .95em; min-height: 1.4em; }
   @media (prefers-color-scheme: dark) {
     body { background: #111; color: #eee; }
     code { background: #222; }
-    .code-box { background: #2b2410; border-color: #604b1a; }
     .sub { color: #777; }
   }
 </style>
 </head>
 <body>
 <h1>Join the Shape Rotator space</h1>
-<p class="sub">Two clicks + a paste. The code below is single-use (or limited) —
-don't share it publicly.</p>
+<p class="sub">Click below — you'll land in a private lobby room where a bot
+asks one captcha (a haiku). Pass it and you're in the space.</p>
 
-<noscript><p class="missing">This page needs JavaScript to show your invite code.</p></noscript>
+<noscript><p class="missing">This page needs JavaScript.</p></noscript>
 
-<p>Your invite code:</p>
-<div class="code-box" id="code">—</div>
+<p class="status" id="status">Preparing your lobby room…</p>
+
+<p><a class="btn" id="join-btn" href="#" aria-disabled="true">Open lobby in Element →</a></p>
 
 <ol>
-  <li>Click the button below. It opens the Shape Rotator space in Element
-      (install Element first if you don't have it:
+  <li>Click the button. It opens your <strong>private lobby room</strong> in
+      Element (install Element first if you don't have it:
       <a href="https://element.io/download">desktop</a> /
       <a href="https://play.google.com/store/apps/details?id=im.vector.app">Android</a> /
       <a href="https://apps.apple.com/app/element-messenger/id1083446067">iOS</a> /
       <a href="https://app.element.io">web</a>).</li>
-  <li>In Element, click <strong>Request to join</strong>.</li>
-  <li>When Element asks for a <strong>reason</strong>, paste the invite code above
-      (tap/click the code to select it).</li>
-  <li>The bot auto-approves within a few seconds — your invite appears, accept it,
-      and you're in.</li>
+  <li>Click <strong>Join the room</strong>. The bot will post a haiku challenge.</li>
+  <li>Reply with a 3-line haiku containing the keyword the bot gives you.</li>
+  <li>You'll be invited into the Shape Rotator space; accept and you're in.</li>
 </ol>
 
-<p><a class="btn" id="join-btn" href="#">Open Shape Rotator in Element →</a></p>
-
 <p style="color:#888;font-size:.9em">No Matrix account yet? Element will walk you through
-making one on <code>matrix.org</code> first — that's recommended.</p>
+making one on <code>matrix.org</code> first.</p>
 
 <script>
-  const params = new URLSearchParams(location.search);
-  const code = (params.get("code") || "").trim();
-  const codeEl = document.getElementById("code");
-  const btn    = document.getElementById("join-btn");
-  if (code) {
-    codeEl.textContent = code;
-    codeEl.addEventListener("click", () => {
-      const range = document.createRange();
-      range.selectNodeContents(codeEl);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-    });
-  } else {
-    codeEl.textContent = "(no code in URL — ask whoever sent you the link)";
-    codeEl.classList.add("missing");
+  const params  = new URLSearchParams(location.search);
+  const code    = (params.get("code") || "").trim();
+  const btn     = document.getElementById("join-btn");
+  const status  = document.getElementById("status");
+
+  async function mintLobby() {
+    if (!code) {
+      status.textContent = "No code in URL — ask whoever sent you the link.";
+      status.classList.add("missing");
+      return;
+    }
+    try {
+      const r = await fetch("/join/api", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ code }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        const detail = j.error || ("http_" + r.status);
+        status.textContent = "Couldn't mint lobby: " + detail
+          + (detail === "invalid_code" ? " (code already used or unknown)" : "");
+        status.classList.add("missing");
+        return;
+      }
+      btn.href = j.url;
+      btn.removeAttribute("aria-disabled");
+      status.textContent = "Lobby ready: " + j.alias;
+    } catch (e) {
+      status.textContent = "Network error reaching /join/api: " + e.message;
+      status.classList.add("missing");
+    }
   }
-  btn.href = "https://matrix.to/#/%23shape-rotator%3Amtrx.shaperotator.xyz";
+  mintLobby();
 </script>
 </body>
 </html>
