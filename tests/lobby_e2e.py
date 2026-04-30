@@ -93,11 +93,18 @@ async def onboard_via_lobby(label):
     if s != 200:
         return None
 
-    # Pull the captcha challenge — bot may need a beat after our join.
+    # Pull the captcha challenge — bot needs to /sync, see our join, and post.
+    # Long-poll with a since token so we wait for the new message rather than
+    # busy-polling the same initial-sync slice.
     keyword = None
-    deadline = time.time() + 20
+    since = None
+    deadline = time.time() + 45
     while time.time() < deadline:
-        _s, sync = http("GET", "/_matrix/client/v3/sync?timeout=0", token=token)
+        url = "/_matrix/client/v3/sync?timeout=10000"
+        if since:
+            url += f"&since={urllib.parse.quote(since)}"
+        _s, sync = http("GET", url, token=token, timeout=15)
+        since = sync.get("next_batch") or since
         joined = sync.get("rooms", {}).get("join", {}).get(lobby_room, {})
         for ev in joined.get("timeline", {}).get("events", []):
             if ev.get("type") != "m.room.message":

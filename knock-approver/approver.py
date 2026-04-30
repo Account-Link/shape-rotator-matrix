@@ -186,6 +186,25 @@ async def _send_msg(client, room_id, text):
     return await client.send_message_event(room_id, _MAU_EventType.ROOM_MESSAGE, content)
 
 
+async def _send_msg_raw(room_id, text):
+    """Send a cleartext m.room.message via raw HTTP, bypassing mautrix's
+    encryption logic. Used for lobby rooms which are public+cleartext by
+    design — mautrix's state_store can be slow to recognise freshly-created
+    rooms it didn't construct itself, so going around it avoids a flake."""
+    txn = f"sr-lobby-{secrets.token_hex(8)}"
+    body = {"msgtype": "m.text", "body": text}
+    async with aiohttp.ClientSession(
+        headers={**AUTH, "Content-Type": "application/json"}
+    ) as s:
+        url = (f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
+               f"/send/m.room.message/{txn}")
+        async with s.put(url, json=body) as r:
+            if r.status != 200:
+                raise RuntimeError(
+                    f"send_msg_raw {r.status}: {(await r.text())[:200]}")
+            return (await r.json()).get("event_id")
+
+
 async def _create_vetting_room(client, mxid):
     body = {
         "preset": "private_chat",   # creator PL 100, invitee PL 0
@@ -529,7 +548,7 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
         meta.setdefault("challenged", []).append(mxid)
         meta.setdefault("tries", {})[mxid] = LOBBY_MAX_TRIES
         meta.setdefault("displaynames", {})[mxid] = displayname
-        await _send_msg(client, room_id,
+        await _send_msg_raw(room_id,
             f"hi {mxid} — quick captcha to keep bots out of shape rotator.\n\n"
             f"write a 3-line haiku about: {title}\n"
             f"include the word \"{keyword}\" somewhere.\n"
@@ -551,7 +570,7 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["promoted_user"] = mxid
-                await _send_msg(client, room_id,
+                await _send_msg_raw(room_id,
                     "nice — invited you to shape rotator. see you in the space.")
                 if FEED_ROOM:
                     haiku_lines = [f"> {l}" for l in (text or "").strip().splitlines()
@@ -578,7 +597,7 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
             return meta
         meta["tries"][mxid] = meta["tries"].get(mxid, LOBBY_MAX_TRIES) - 1
         if meta["tries"][mxid] <= 0:
-            await _send_msg(client, room_id,
+            await _send_msg_raw(room_id,
                 f"{mxid}: out of tries. get a fresh code and try again.")
             audit({"type": "lobby_failed", "user": mxid, "room": room_id})
             # Don't close the whole room on one failure — others might still
@@ -589,7 +608,7 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
             except ValueError:
                 pass
         else:
-            await _send_msg(client, room_id,
+            await _send_msg_raw(room_id,
                 f"{mxid}: not yet — {why}. {meta['tries'][mxid]} tries left.")
     return meta
 
