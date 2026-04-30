@@ -158,18 +158,26 @@ _STOPWORDS = {"with", "from", "that", "this", "their", "have", "been",
 
 
 async def _fetch_wiki_challenge():
-    """Random wikipedia article -> (title, longest non-stopword >=4-char alpha word)."""
+    """Random wikipedia article -> (title, longest non-stopword >=4-char alpha word).
+
+    Some titles have no usable candidate (all words < 4 chars, non-alpha, or
+    stopwords — e.g. "F.C. Roma", "Foo & Bar"). Retry up to 5 times before
+    falling back to a generic keyword so the endpoint never 500s.
+    """
     url = "https://en.wikipedia.org/api/rest_v1/page/random/summary"
     headers = {"User-Agent": "shape-rotator-vetting/1.0", "Accept": "application/json"}
+    title = ""
     async with aiohttp.ClientSession(headers=headers) as s:
-        async with s.get(url) as r:
-            body = await r.json()
-    title = body["title"]
-    words = [w.strip(".,;:'\"()[]") for w in title.split()]
-    candidates = [w for w in words
-                  if len(w) >= 4 and w.isalpha() and w.lower() not in _STOPWORDS]
-    keyword = max(candidates, key=len)
-    return title, keyword
+        for _ in range(5):
+            async with s.get(url) as r:
+                body = await r.json()
+            title = body["title"]
+            words = [w.strip(".,;:'\"()[]") for w in title.split()]
+            candidates = [w for w in words
+                          if len(w) >= 4 and w.isalpha() and w.lower() not in _STOPWORDS]
+            if candidates:
+                return title, max(candidates, key=len)
+    return title or "Wikipedia", "wikipedia"
 
 
 async def _send_msg(client, room_id, text):
