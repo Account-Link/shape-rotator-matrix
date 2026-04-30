@@ -222,6 +222,77 @@ async def main():
     await a_db.stop()
     await b_db.stop()
 
+    # Second-pass debug case: alice (now an existing space member) re-runs
+    # the lobby flow. The bot should still post the haiku, accept the answer,
+    # and acknowledge with the "already in space" success ack — proving the
+    # invite-403-because-already-member path is treated as success so an
+    # operator can self-test the whole flow without spinning up new accounts.
+    s, j = http("POST", "/join/api", body={"code": KNOCK_CODE})
+    log("[alice-redo] /join/api returned 200 for existing member",
+        s == 200, f"status={s}")
+    if s == 200:
+        redo_room = j["room_id"]
+        s2, _ = http("POST",
+                     f"/_matrix/client/v3/join/{urllib.parse.quote(j['alias'])}",
+                     token=a_token, body={})
+        log("[alice-redo] joined fresh lobby as existing member",
+            s2 == 200, f"status={s2}")
+
+        keyword = None
+        since = None
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            url = "/_matrix/client/v3/sync?timeout=10000"
+            if since:
+                url += f"&since={urllib.parse.quote(since)}"
+            _s, sync = http("GET", url, token=a_token, timeout=15)
+            since = sync.get("next_batch") or since
+            joined = sync.get("rooms", {}).get("join", {}).get(redo_room, {})
+            for ev in joined.get("timeline", {}).get("events", []):
+                if ev.get("type") != "m.room.message":
+                    continue
+                body_text = (ev.get("content") or {}).get("body", "")
+                m = re.search(r'include the word "([^"]+)"', body_text)
+                if m:
+                    keyword = m.group(1)
+                    break
+            if keyword:
+                break
+            await asyncio.sleep(1)
+        log("[alice-redo] captcha keyword visible", bool(keyword),
+            f"keyword={keyword!r}")
+
+        if keyword:
+            haiku = (f"silent {keyword} hum\nfloating in the morning fog\n"
+                     f"spring wind blowing through")
+            http("PUT",
+                 f"/_matrix/client/v3/rooms/{urllib.parse.quote(redo_room)}"
+                 f"/send/m.room.message/e2e-redo-{int(time.time())}",
+                 token=a_token, body={"msgtype": "m.text", "body": haiku})
+
+            # Wait for the bot's "already in space" success ack.
+            ack = None
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                url = "/_matrix/client/v3/sync?timeout=10000"
+                if since:
+                    url += f"&since={urllib.parse.quote(since)}"
+                _s, sync = http("GET", url, token=a_token, timeout=15)
+                since = sync.get("next_batch") or since
+                joined = sync.get("rooms", {}).get("join", {}).get(redo_room, {})
+                for ev in joined.get("timeline", {}).get("events", []):
+                    if ev.get("type") != "m.room.message":
+                        continue
+                    b = (ev.get("content") or {}).get("body", "")
+                    if "already in shape rotator" in b.lower():
+                        ack = b
+                        break
+                if ack:
+                    break
+                await asyncio.sleep(1)
+            log("[alice-redo] got 'already in space' ack from bot",
+                bool(ack), f"ack={ack!r}")
+
     failed = [name for name, ok in results if not ok]
     print(f"\n=== {len(results) - len(failed)}/{len(results)} pass ===")
     if failed:

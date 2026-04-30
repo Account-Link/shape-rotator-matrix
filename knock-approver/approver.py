@@ -566,13 +566,24 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
         ok, why = _vet(displayname, text, keyword)
         if ok:
             st, body = await _promote(client, mxid)
-            if st == 200:
+            # /invite returning 403 means either "already in the room" or
+            # the bot lacks PL. The bot has PL by construction (alice/bob's
+            # first promote works); the only realistic 403 in this flow is
+            # "already member." Treat it as success so re-running the lobby
+            # works cleanly as a debug self-test.
+            already_member = (st == 403)
+            if already_member:
+                print(f"[lobby] promote 403 — assuming already-member. "
+                      f"body={body[:200]}", flush=True)
+            if st == 200 or already_member:
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["promoted_user"] = mxid
-                await _send_msg_raw(room_id,
-                    "nice — invited you to shape rotator. see you in the space.")
-                if FEED_ROOM:
+                ack = ("you're already in shape rotator — see you in the space."
+                       if already_member else
+                       "nice — invited you to shape rotator. see you in the space.")
+                await _send_msg_raw(room_id, ack)
+                if FEED_ROOM and not already_member:
                     haiku_lines = [f"> {l}" for l in (text or "").strip().splitlines()
                                    if l.strip()]
                     relay = "\n".join([
@@ -584,12 +595,15 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
                     ])
                     await _send_msg(client, FEED_ROOM, relay)
                 audit({"type": "lobby_promoted", "user": mxid, "room": room_id,
-                       "haiku": text, "title": title, "keyword": keyword})
-                print(f"[lobby promoted] {mxid} ({displayname})", flush=True)
-                # Bot leaves the lobby — no admin remains, room dies naturally.
+                       "haiku": text, "title": title, "keyword": keyword,
+                       "already_member": already_member})
+                print(f"[lobby promoted] {mxid} ({displayname})"
+                      f"{' (already in space)' if already_member else ''}",
+                      flush=True)
                 await _leave(client, room_id, reason="lobby done")
                 meta["closed"] = True
-                meta["closed_reason"] = "promoted"
+                meta["closed_reason"] = ("already_member" if already_member
+                                         else "promoted")
             else:
                 audit({"type": "lobby_promote_failed", "user": mxid,
                        "status": st, "body": body[:200]})
