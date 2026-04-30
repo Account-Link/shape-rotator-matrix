@@ -90,6 +90,14 @@ ONBOARDING_INVITER_MXID = os.environ.get("ONBOARDING_INVITER_MXID", "").strip()
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
+# Dedicated onboarding bot identity for the lobby flow. Different mxid from
+# MATRIX_TOKEN's bot so the hermes-staging Claude agent (which shares the
+# MATRIX_TOKEN mxid) auto-leaving a non-E2EE lobby doesn't evict the bot
+# from its own room. Falls back to MATRIX_TOKEN for graceful rollout if
+# the env var isn't configured.
+LOBBY_TOKEN = os.environ.get("ONBOARDING_BOT_TOKEN", "").strip() or TOKEN
+LOBBY_AUTH  = {"Authorization": f"Bearer {LOBBY_TOKEN}"}
+
 
 # --- JSON-file helpers ---
 
@@ -199,14 +207,15 @@ async def _send_msg(client, room_id, text):
 
 
 async def _send_msg_raw(room_id, text):
-    """Send a cleartext m.room.message via raw HTTP, bypassing mautrix's
-    encryption logic. Used for lobby rooms which are public+cleartext by
-    design — mautrix's state_store can be slow to recognise freshly-created
-    rooms it didn't construct itself, so going around it avoids a flake."""
+    """Send a cleartext m.room.message via raw HTTP as the lobby/onboarding
+    bot. Bypasses mautrix encryption logic (lobbies are public + cleartext
+    by design) and uses LOBBY_AUTH so it's the dedicated onboarding-bot
+    identity, not the shared MATRIX_TOKEN bot that hermes-staging's Claude
+    agent also uses."""
     txn = f"sr-lobby-{secrets.token_hex(8)}"
     body = {"msgtype": "m.text", "body": text}
     async with aiohttp.ClientSession(
-        headers={**AUTH, "Content-Type": "application/json"}
+        headers={**LOBBY_AUTH, "Content-Type": "application/json"}
     ) as s:
         url = (f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
                f"/send/m.room.message/{txn}")
@@ -215,6 +224,35 @@ async def _send_msg_raw(room_id, text):
                 raise RuntimeError(
                     f"send_msg_raw {r.status}: {(await r.text())[:200]}")
             return (await r.json()).get("event_id")
+
+
+async def _lobby_invite_to_space(mxid):
+    """Invite mxid to the space using the lobby/onboarding bot. Returns
+    (status, body[:300]). Caller distinguishes 200 (invited) from 403
+    (already a member — treat as success)."""
+    async with aiohttp.ClientSession(
+        headers={**LOBBY_AUTH, "Content-Type": "application/json"}
+    ) as s:
+        url = f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(SPACE_ID)}/invite"
+        async with s.post(url, json={"user_id": mxid,
+                                     "reason": "vetted via lobby airlock"}) as r:
+            return r.status, (await r.text())[:300]
+
+
+async def _lobby_leave_room(room_id, reason="lobby done"):
+    """Leave a lobby room as the lobby/onboarding bot. Best-effort —
+    swallow errors so a failed leave doesn't strand the lobby state."""
+    async with aiohttp.ClientSession(
+        headers={**LOBBY_AUTH, "Content-Type": "application/json"}
+    ) as s:
+        url = f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/leave"
+        try:
+            async with s.post(url, json={"reason": reason}) as r:
+                if r.status != 200:
+                    print(f"[lobby leave warn] {room_id}: "
+                          f"{r.status} {(await r.text())[:200]}", flush=True)
+        except Exception as e:
+            print(f"[lobby leave failed] {room_id}: {e}", flush=True)
 
 
 async def _create_vetting_room(client, mxid):
@@ -304,7 +342,7 @@ async def handle_knock(client, room_id, user_id, reason):
     _save(VETTING_PATH, state)
 
     await _send_msg(client, vroom,
-        f"hi {user_id} — quick captcha to keep bots out of shape rotator.\n\n"
+        f"hi {user_id} — responsiveness check — confirms someone (human or agent) is on the line.\n\n"
         f"write a 3-line haiku about: {title}\n"
         f"include the word \"{keyword}\" somewhere.\n"
         f"reply in this room. {VETTING_MAX_TRIES} tries.")
@@ -457,9 +495,23 @@ async def _create_lobby_room_raw(code):
         "name":  "shape-rotator lobby",
         "topic": "haiku airlock — answer the challenge to be invited to the space.",
         "room_version": "11",
+        # world_readable history bypasses continuwuity's per-event
+        # visibility check, which fails with "shortstatehash not found"
+        # after a remote fast_join (the optimisation continuwuity uses
+        # when a federated user joins a public room without full state
+        # resolution). With shared history (the public_chat default),
+        # the bot's messages get stuck — matrix.org asks "can I see
+        # this?" and continuwuity can't answer, so the user's Element
+        # never renders the challenge. world_readable means "anyone
+        # can see history" and the visibility check is a no-op.
+        "initial_state": [
+            {"type": "m.room.history_visibility",
+             "state_key": "",
+             "content": {"history_visibility": "world_readable"}},
+        ],
     }
     async with aiohttp.ClientSession(
-        headers={**AUTH, "Content-Type": "application/json"}
+        headers={**LOBBY_AUTH, "Content-Type": "application/json"}
     ) as s:
         url = f"{HS}/_matrix/client/v3/createRoom"
         async with s.post(url, json=body) as r:
@@ -534,9 +586,13 @@ async def join_handler(request):
     })
 
 
-def iter_lobby_rooms(rooms_data, lobby_state):
+def iter_lobby_rooms(rooms_data, lobby_state, self_mxid):
     """For each open lobby room we own, yield
     (room_id, meta, list_of_user_join_events, list_of_user_msg_events).
+
+    self_mxid is the mxid of whichever bot is doing the /sync (the lobby bot
+    in lobby_sync_loop, the main bot if called from sync_loop). Used to
+    filter out the bot's own join + message events.
 
     We gather joins for users not yet challenged, plus messages from anyone
     who has already been challenged (so we can vet their haikus).
@@ -554,33 +610,41 @@ def iter_lobby_rooms(rooms_data, lobby_state):
                 if content.get("membership") != "join":
                     continue
                 mxid = ev.get("state_key", "")
-                if not mxid or mxid == OUR_MXID:
+                if not mxid or mxid == self_mxid:
                     continue
                 if mxid in meta.get("challenged", []):
                     continue
                 new_joins.append(ev)
         msgs = [ev for ev in rd.get("timeline", {}).get("events", [])
                 if ev.get("type") == "m.room.message"
-                and ev.get("sender") != OUR_MXID
+                and ev.get("sender") != self_mxid
                 and ev.get("sender") in meta.get("challenged", [])]
         if new_joins or msgs:
             yield room_id, meta, new_joins, msgs
 
 
-async def process_lobby_room(client, room_id, meta, new_joins, msgs):
-    """Handle joins (post challenge) and messages (vet haiku) for one lobby."""
+async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
+    """Handle joins (post challenge) and messages (vet haiku) for one lobby.
+
+    Runs as the dedicated onboarding bot (LOBBY_TOKEN). lobby_mxid is the
+    bot's own mxid (filtering out its own join/messages). All Matrix calls
+    are raw HTTP via LOBBY_AUTH so they don't touch the main bot's mautrix
+    crypto state.
+    """
     keyword = meta["keyword"]
     title   = meta["title"]
 
     # Post the haiku challenge to anyone who joined since last cycle.
     for ev in new_joins:
         mxid = ev["state_key"]
+        if mxid == lobby_mxid:
+            continue
         displayname = (ev.get("content") or {}).get("displayname", "")
         meta.setdefault("challenged", []).append(mxid)
         meta.setdefault("tries", {})[mxid] = LOBBY_MAX_TRIES
         meta.setdefault("displaynames", {})[mxid] = displayname
         await _send_msg_raw(room_id,
-            f"hi {mxid} — quick captcha to keep bots out of shape rotator.\n\n"
+            f"hi {mxid} — responsiveness check — confirms someone (human or agent) is on the line.\n\n"
             f"write a 3-line haiku about: {title}\n"
             f"include the word \"{keyword}\" somewhere.\n"
             f"reply in this room. {LOBBY_MAX_TRIES} tries.")
@@ -592,14 +656,16 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
     # Vet any new messages from already-challenged users.
     for msg in msgs:
         mxid = msg["sender"]
+        if mxid == lobby_mxid:
+            continue
         text = (msg.get("content") or {}).get("body", "")
         displayname = meta.get("displaynames", {}).get(mxid, "")
         ok, why = _vet(displayname, text, keyword)
         if ok:
-            st, body = await _promote(client, mxid)
+            st, body = await _lobby_invite_to_space(mxid)
             # /invite returning 403 means either "already in the room" or
-            # the bot lacks PL. The bot has PL by construction (alice/bob's
-            # first promote works); the only realistic 403 in this flow is
+            # the bot lacks PL. The lobby bot has PL by construction (PL>=50
+            # on the space); the only realistic 403 in this flow is
             # "already member." Treat it as success so re-running the lobby
             # works cleanly as a debug self-test.
             already_member = (st == 403)
@@ -614,24 +680,17 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
                        if already_member else
                        "nice — invited you to shape rotator. see you in the space.")
                 await _send_msg_raw(room_id, ack)
-                if FEED_ROOM and not already_member:
-                    haiku_lines = [f"> {l}" for l in (text or "").strip().splitlines()
-                                   if l.strip()]
-                    relay = "\n".join([
-                        f"🌸 {displayname or mxid} ({mxid}) joined Shape Rotator",
-                        f"captcha: write a haiku about \"{title}\" "
-                        f"including the word \"{keyword}\"",
-                        "",
-                        *haiku_lines,
-                    ])
-                    await _send_msg(client, FEED_ROOM, relay)
+                # FEED_ROOM relay (haiku celebration to #matrix-devops) is
+                # the main bot's job, not the lobby bot's — it lives in a
+                # different room the lobby bot may not be in. Skipped here;
+                # if you want this back, handle it via the main sync_loop.
                 audit({"type": "lobby_promoted", "user": mxid, "room": room_id,
                        "haiku": text, "title": title, "keyword": keyword,
                        "already_member": already_member})
                 print(f"[lobby promoted] {mxid} ({displayname})"
                       f"{' (already in space)' if already_member else ''}",
                       flush=True)
-                await _leave(client, room_id, reason="lobby done")
+                await _lobby_leave_room(room_id, reason="lobby done")
                 meta["closed"] = True
                 meta["closed_reason"] = ("already_member" if already_member
                                          else "promoted")
@@ -645,9 +704,6 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
             await _send_msg_raw(room_id,
                 f"{mxid}: out of tries. get a fresh code and try again.")
             audit({"type": "lobby_failed", "user": mxid, "room": room_id})
-            # Don't close the whole room on one failure — others might still
-            # try. Just stop processing this user's messages by removing
-            # them from the challenged list so iter_lobby_rooms ignores them.
             try:
                 meta["challenged"].remove(mxid)
             except ValueError:
@@ -658,7 +714,7 @@ async def process_lobby_room(client, room_id, meta, new_joins, msgs):
     return meta
 
 
-async def cleanup_stale_lobby(client, lobby_state):
+async def cleanup_stale_lobby(lobby_state):
     """Leave lobby rooms older than LOBBY_TIMEOUT with no promotion."""
     now = time.time()
     dirty = False
@@ -666,13 +722,108 @@ async def cleanup_stale_lobby(client, lobby_state):
         if meta.get("promoted") or meta.get("closed"):
             continue
         if now - meta.get("created", 0) > LOBBY_TIMEOUT:
-            await _leave(client, room_id, reason="lobby timeout")
+            await _lobby_leave_room(room_id, reason="lobby timeout")
             meta["closed"] = True
             meta["closed_reason"] = "timeout"
             audit({"type": "lobby_timeout", "room": room_id,
                    "code": meta.get("code")})
             dirty = True
     return dirty
+
+
+# --- Lobby sync loop (runs as the dedicated onboarding bot) ---
+
+LOBBY_SYNC_STATE = Path(os.environ.get("LOBBY_SYNC_STATE",
+                                       "/data/lobby_sync_since.txt"))
+
+
+async def _lobby_whoami():
+    """Return (mxid, device_id) for LOBBY_TOKEN, or (None, None) on failure."""
+    async with aiohttp.ClientSession(headers=LOBBY_AUTH) as s:
+        async with s.get(f"{HS}/_matrix/client/v3/account/whoami") as r:
+            if r.status != 200:
+                return None, None
+            j = await r.json()
+            return j.get("user_id"), j.get("device_id")
+
+
+async def _lobby_accept_pending_invites(rooms_data):
+    """Auto-accept any pending invites for the lobby bot. Lobby rooms are
+    created by the bot itself so this is mostly a safety net for ops/admin
+    flows that invite the lobby bot somewhere."""
+    for room_id in list(rooms_data.get("invite", {}).keys()):
+        async with aiohttp.ClientSession(
+            headers={**LOBBY_AUTH, "Content-Type": "application/json"}
+        ) as s:
+            url = f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/join"
+            try:
+                async with s.post(url, json={}) as r:
+                    if r.status == 200:
+                        print(f"[lobby] auto-joined {room_id}", flush=True)
+                    else:
+                        print(f"[lobby] auto-join warn {room_id}: "
+                              f"{r.status} {(await r.text())[:200]}", flush=True)
+            except Exception as e:
+                print(f"[lobby] auto-join failed {room_id}: {e}", flush=True)
+
+
+async def lobby_sync_loop():
+    """Long-poll /sync as the dedicated onboarding bot (LOBBY_TOKEN) and
+    drive lobby flow processing. Runs in parallel with the main sync_loop.
+
+    Cleartext-only — no OlmMachine, no crypto store. Lobby rooms are
+    public + cleartext by design, so raw HTTP is sufficient.
+    """
+    lobby_mxid, lobby_device = await _lobby_whoami()
+    if not lobby_mxid:
+        print("[lobby sync] LOBBY_TOKEN whoami failed; lobby flow disabled",
+              flush=True)
+        return
+    print(f"[lobby sync] running as {lobby_mxid}; device={lobby_device}",
+          flush=True)
+
+    since = (LOBBY_SYNC_STATE.read_text().strip()
+             if LOBBY_SYNC_STATE.exists() else None)
+
+    while True:
+        url = f"{HS}/_matrix/client/v3/sync?timeout=30000"
+        if since:
+            url += f"&since={urllib.parse.quote(since)}"
+        try:
+            async with aiohttp.ClientSession(headers=LOBBY_AUTH) as s:
+                async with s.get(url) as r:
+                    if r.status != 200:
+                        print(f"[lobby sync] {r.status} "
+                              f"{(await r.text())[:200]}", flush=True)
+                        await asyncio.sleep(5)
+                        continue
+                    data = await r.json()
+        except Exception as e:
+            print(f"[lobby sync error] {type(e).__name__}: {e}", flush=True)
+            await asyncio.sleep(5)
+            continue
+
+        next_batch = data.get("next_batch")
+        if next_batch:
+            since = next_batch
+            LOBBY_SYNC_STATE.write_text(since)
+
+        rooms_data = data.get("rooms", {}) or {}
+        await _lobby_accept_pending_invites(rooms_data)
+
+        lobby_state = _load(LOBBY_PATH)
+        l_dirty = False
+        for lroom, meta, new_joins, msgs in iter_lobby_rooms(
+                rooms_data, lobby_state, lobby_mxid):
+            updated = await process_lobby_room(lroom, meta, new_joins,
+                                               msgs, lobby_mxid)
+            if updated is not None:
+                lobby_state[lroom] = updated
+                l_dirty = True
+        if await cleanup_stale_lobby(lobby_state):
+            l_dirty = True
+        if l_dirty:
+            _save(LOBBY_PATH, lobby_state)
 
 
 # --- Admin commands (!mint / !codes / !revoke) ---
@@ -1015,18 +1166,9 @@ async def sync_loop():
         if v_dirty:
             _save(VETTING_PATH, vetting_state)
 
-        lobby_state = _load(LOBBY_PATH)
-        l_dirty = False
-        for lroom, meta, new_joins, msgs in iter_lobby_rooms(
-                data.get("rooms", {}), lobby_state):
-            updated = await process_lobby_room(client, lroom, meta, new_joins, msgs)
-            if updated is not None:
-                lobby_state[lroom] = updated
-                l_dirty = True
-        if await cleanup_stale_lobby(client, lobby_state):
-            l_dirty = True
-        if l_dirty:
-            _save(LOBBY_PATH, lobby_state)
+        # Lobby flow runs in its own /sync loop (lobby_sync_loop) under the
+        # dedicated onboarding-bot identity (LOBBY_TOKEN), so it doesn't appear
+        # here. See lobby_sync_loop() below.
 
         # Drain queued admin commands (event handler may have populated
         # them with decrypted message events).
@@ -1430,7 +1572,11 @@ async def main():
     merge_seed(SIGNUP_PATH, "INITIAL_SIGNUP_CODES")
 
     await run_http()
-    await sync_loop()
+    # Run main sync_loop (knocks, vetting, admin commands) and lobby_sync_loop
+    # (dedicated onboarding-bot identity for the lobby flow) in parallel.
+    # If LOBBY_TOKEN == TOKEN (no dedicated bot configured), both loops sync
+    # the same user — works but wasteful; configure ONBOARDING_BOT_TOKEN.
+    await asyncio.gather(sync_loop(), lobby_sync_loop())
 
 if __name__ == "__main__":
     try:

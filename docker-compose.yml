@@ -85,6 +85,9 @@ services:
       HS: http://continuwuity:6167
       HS_PUBLIC: https://mtrx.shaperotator.xyz
       MATRIX_TOKEN: ${KNOCK_APPROVER_TOKEN}
+      # Dedicated onboarding-bot identity for the lobby flow. Empty falls
+      # back to MATRIX_TOKEN. See knock-approver/approver.py LOBBY_TOKEN.
+      ONBOARDING_BOT_TOKEN: ${ONBOARDING_BOT_TOKEN:-}
       SPACE_ID: ${SHAPEROTATOR_SPACE_ID}
       SPACE_CHILD_IDS: ${SPACE_CHILD_IDS}
       ONBOARDING_INVITER_MXID: ${ONBOARDING_INVITER_MXID}
