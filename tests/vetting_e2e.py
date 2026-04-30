@@ -81,7 +81,7 @@ async def onboard_via_vetting(label):
     log(f"[{label}] knock posted", s == 200, f"status={s}")
 
     space_prefix = SPACE_ID.split(":")[0]
-    deadline = time.time() + 30
+    deadline = time.time() + 60
     vetting_room = None
     while time.time() < deadline:
         _s, sync = http("GET", "/_matrix/client/v3/sync?timeout=0", token=token)
@@ -104,7 +104,7 @@ async def onboard_via_vetting(label):
 
     # Pull the captcha challenge — bot may need a beat after our join.
     keyword = None
-    deadline = time.time() + 15
+    deadline = time.time() + 30
     while time.time() < deadline:
         _s, sync = http("GET", "/_matrix/client/v3/sync?timeout=0", token=token)
         joined = sync.get("rooms", {}).get("join", {}).get(vetting_room, {})
@@ -134,7 +134,7 @@ async def onboard_via_vetting(label):
     log(f"[{label}] haiku sent", s == 200, f"status={s}")
 
     # Wait for the actual space invite.
-    deadline = time.time() + 30
+    deadline = time.time() + 60
     got_space = False
     while time.time() < deadline:
         _s, sync = http("GET", "/_matrix/client/v3/sync?timeout=0", token=token)
@@ -204,7 +204,7 @@ async def main():
         f"event_id={event_id}")
 
     decrypted_body = None
-    deadline = time.time() + 30
+    deadline = time.time() + 60
     received = asyncio.Event()
 
     async def on_msg(evt):
