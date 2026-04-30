@@ -55,6 +55,18 @@ DEV_HS="$HS" \
   ADMIN_MXID="$ADMIN_MXID" \
   python3 tests/vetting_e2e.py
 
+# Lobby flow: POST /join/api → fresh public room → haiku → space, with
+# an E2EE round-trip in #bot-noise to prove the new path doesn't wedge
+# crypto for users who arrive via the lobby instead of the knock.
+echo "[runner] === lobby_e2e.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  DEV_KNOCK_CODE="$DEV_KNOCK_CODE" \
+  SPACE_ID="$SPACE_ID" \
+  SPACE_CHILD_IDS="$SPACE_CHILD_IDS" \
+  ADMIN_MXID="$ADMIN_MXID" \
+  python3 tests/lobby_e2e.py
+
 # E2EE admin-command test — verifies bot decrypts !mint in an encrypted
 # room and replies encrypted. This is the regression gate for the
 # mautrix-bot migration.
