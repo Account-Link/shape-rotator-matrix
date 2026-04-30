@@ -160,18 +160,30 @@ _STOPWORDS = {"with", "from", "that", "this", "their", "have", "been",
 async def _fetch_wiki_challenge():
     """Random wikipedia article -> (title, longest non-stopword >=4-char alpha word).
 
-    Some titles have no usable candidate (all words < 4 chars, non-alpha, or
-    stopwords — e.g. "F.C. Roma", "Foo & Bar"). Retry up to 5 times before
-    falling back to a generic keyword so the endpoint never 500s.
+    Retries cover three real failure modes seen in the e2e suite:
+      - title with no usable candidate (all short / non-alpha / stopword)
+      - wikipedia rate-limit (429, returns text/plain not JSON → ContentTypeError)
+      - transient network / 5xx
+    Falls back to ('Wikipedia', 'wikipedia') so /join/api never 500s.
     """
     url = "https://en.wikipedia.org/api/rest_v1/page/random/summary"
     headers = {"User-Agent": "shape-rotator-vetting/1.0", "Accept": "application/json"}
     title = ""
     async with aiohttp.ClientSession(headers=headers) as s:
-        for _ in range(5):
-            async with s.get(url) as r:
-                body = await r.json()
-            title = body["title"]
+        for attempt in range(5):
+            try:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status != 200:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    body = await r.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError,
+                    json.JSONDecodeError) as e:
+                print(f"[wiki] attempt {attempt} failed: "
+                      f"{type(e).__name__}: {str(e)[:120]}", flush=True)
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            title = body.get("title", "") or title
             words = [w.strip(".,;:'\"()[]") for w in title.split()]
             candidates = [w for w in words
                           if len(w) >= 4 and w.isalpha() and w.lower() not in _STOPWORDS]
