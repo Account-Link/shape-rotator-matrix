@@ -105,9 +105,13 @@ services:
       - knock-data:/data
     # Exposed on the internal docker network only; nginx proxies /signup/api
     # to port 8001 of this service. No host port mapping.
+    # libolm + mautrix needed for the E2EE-aware sync loop and
+    # cross-signing helpers. apt-get + pip install take ~60s on first
+    # boot; subsequent boots reuse the apt + pip layer caches.
     command: >
       sh -c '
-      pip install --quiet aiohttp cryptography &&
+      apt-get update -qq && apt-get install -y --no-install-recommends -qq libolm3 libolm-dev gcc &&
+      pip install --quiet aiohttp cryptography mautrix asyncpg aiosqlite python-olm unpaddedbase64 base58 pyaes &&
       echo "$$APPROVER_B64" | base64 -d > /app.py &&
       exec python -u /app.py
       '
