@@ -113,8 +113,11 @@ async def main():
     with urllib.request.urlopen(req) as r:
         log("test user joined admin room", r.status == 200, f"status={r.status}")
 
-    # Initial sync to learn room state + member device keys.
-    for _ in range(3):
+    # Initial sync to learn room state + exchange device keys with the bot.
+    # GitHub Actions runners are slower than local — 5 warmup syncs gives
+    # mautrix time to fetch + verify the bot's device keys before we start
+    # sending encrypted traffic.
+    for _ in range(5):
         await sync_once(client, ss, timeout=2000, first=True)
 
     enc = await ss.is_encrypted(ADMIN_ROOM)
@@ -129,8 +132,10 @@ async def main():
     log("sent encrypted !mint command", bool(sent_id), f"event_id={sent_id}")
 
     # Poll for the bot's reply: decrypted body should contain the label
-    # we passed AND a /join?code= URL.
-    deadline = time.time() + 45
+    # we passed AND a /join?code= URL. Generous deadline (120s) — on slow
+    # CI runners the bot may be mid-sync of the previous test's traffic
+    # when our !mint lands.
+    deadline = time.time() + 120
     seen_reply = None
     received = asyncio.Event()
 
