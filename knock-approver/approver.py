@@ -1,12 +1,19 @@
 """Auto-approve Matrix knocks on the Shape Rotator space, AND proxy signups.
 
-Two responsibilities, both running in one process:
+Three responsibilities, all running in one process:
 
 1. **Knock approver** (long-running /sync loop).
    Watches the space for membership=knock events. When the knock reason matches
    an entry in /data/codes.json, POSTs /invite to approve.
 
-2. **Signup auth proxy** (HTTP server on port 8001).
+2. **Lobby door** (HTTP /join/api + sync-loop handler).
+   POST /join/api {code} validates the code, mints a fresh public room with a
+   random alias, returns the matrix.to URL. The user clicks through, joins
+   instantly (no Element knock UI), the bot sees the join in /sync, posts a
+   wikipedia haiku challenge, and on success invites the user to the space
+   and leaves the lobby room (which then dies).
+
+3. **Signup auth proxy** (HTTP /signup/api).
    POST /signup/api  body: {"code", "username", "password"}
    Validates code against /data/signup_codes.json, completes continuwuity
    registration using the server-side CONDUWUIT_REGISTRATION_TOKEN (never
@@ -17,16 +24,18 @@ Env:
   MATRIX_TOKEN                 access token for a user with PL >= 50 in the space
   SPACE_ID                     unsuffixed space room id
   CONDUWUIT_REGISTRATION_TOKEN shared reg token (kept server-side)
+  SERVER_NAME                  homeserver name for room aliases (e.g. mtrx.shaperotator.xyz)
   INITIAL_CODES                JSON seed for knock codes
   INITIAL_SIGNUP_CODES         JSON seed for signup codes
 
 State files on the knock-data volume:
   /data/codes.json          knock codes
   /data/signup_codes.json   signup codes
+  /data/lobby.json          live lobby rooms (per-/join/api room)
   /data/log.jsonl           audit log
   /data/sync_since.txt      /sync cursor
 """
-import asyncio, base64, json, os, secrets, sys, time
+import asyncio, base64, json, os, secrets, sys, time, urllib.parse
 from pathlib import Path
 import aiohttp
 from aiohttp import web
@@ -133,6 +142,15 @@ VETTING_PATH      = Path(os.environ.get("VETTING_PATH",       "/data/vetting.jso
 VETTING_TIMEOUT   = int(os.environ.get("VETTING_TIMEOUT_SEC", "7200"))
 VETTING_MAX_TRIES = int(os.environ.get("VETTING_MAX_TRIES",   "3"))
 
+# Lobby flow — POST /join/api creates a fresh public room per code use.
+LOBBY_PATH         = Path(os.environ.get("LOBBY_PATH",        "/data/lobby.json"))
+LOBBY_TIMEOUT      = int(os.environ.get("LOBBY_TIMEOUT_SEC",  "7200"))
+LOBBY_MAX_TRIES    = int(os.environ.get("LOBBY_MAX_TRIES",    "3"))
+LOBBY_ALIAS_PREFIX = os.environ.get("LOBBY_ALIAS_PREFIX", "shape-rotator-lobby-")
+# Server name for room aliases. May be overridden by env; otherwise resolved
+# at startup from /whoami (parsing the homeserver's view of OUR_MXID).
+SERVER_NAME        = os.environ.get("SERVER_NAME", "").strip()
+
 # Stop-words too generic to use as the haiku-keyword constraint.
 _STOPWORDS = {"with", "from", "that", "this", "their", "have", "been",
               "were", "into", "over", "when", "what", "where", "which",
@@ -140,24 +158,51 @@ _STOPWORDS = {"with", "from", "that", "this", "their", "have", "been",
 
 
 async def _fetch_wiki_challenge():
-    """Random wikipedia article -> (title, longest non-stopword >=4-char alpha word)."""
+    """Random wikipedia article -> (title, longest non-stopword >=4-char alpha word).
+
+    Some titles have no usable candidate (all words < 4 chars, non-alpha, or
+    stopwords — e.g. "F.C. Roma", "Foo & Bar"). Retry up to 5 times before
+    falling back to a generic keyword so the endpoint never 500s.
+    """
     url = "https://en.wikipedia.org/api/rest_v1/page/random/summary"
     headers = {"User-Agent": "shape-rotator-vetting/1.0", "Accept": "application/json"}
+    title = ""
     async with aiohttp.ClientSession(headers=headers) as s:
-        async with s.get(url) as r:
-            body = await r.json()
-    title = body["title"]
-    words = [w.strip(".,;:'\"()[]") for w in title.split()]
-    candidates = [w for w in words
-                  if len(w) >= 4 and w.isalpha() and w.lower() not in _STOPWORDS]
-    keyword = max(candidates, key=len)
-    return title, keyword
+        for _ in range(5):
+            async with s.get(url) as r:
+                body = await r.json()
+            title = body["title"]
+            words = [w.strip(".,;:'\"()[]") for w in title.split()]
+            candidates = [w for w in words
+                          if len(w) >= 4 and w.isalpha() and w.lower() not in _STOPWORDS]
+            if candidates:
+                return title, max(candidates, key=len)
+    return title or "Wikipedia", "wikipedia"
 
 
 async def _send_msg(client, room_id, text):
     """Send a plain text message. Auto-encrypts if room has m.room.encryption."""
     content = _MAU_TextContent(msgtype=_MAU_MessageType.TEXT, body=text)
     return await client.send_message_event(room_id, _MAU_EventType.ROOM_MESSAGE, content)
+
+
+async def _send_msg_raw(room_id, text):
+    """Send a cleartext m.room.message via raw HTTP, bypassing mautrix's
+    encryption logic. Used for lobby rooms which are public+cleartext by
+    design — mautrix's state_store can be slow to recognise freshly-created
+    rooms it didn't construct itself, so going around it avoids a flake."""
+    txn = f"sr-lobby-{secrets.token_hex(8)}"
+    body = {"msgtype": "m.text", "body": text}
+    async with aiohttp.ClientSession(
+        headers={**AUTH, "Content-Type": "application/json"}
+    ) as s:
+        url = (f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
+               f"/send/m.room.message/{txn}")
+        async with s.put(url, json=body) as r:
+            if r.status != 200:
+                raise RuntimeError(
+                    f"send_msg_raw {r.status}: {(await r.text())[:200]}")
+            return (await r.json()).get("event_id")
 
 
 async def _create_vetting_room(client, mxid):
@@ -360,6 +405,227 @@ async def cleanup_stale_vetting(client, vetting_state):
             meta["closed"] = True
             meta["closed_reason"] = "timeout"
             audit({"type": "vetting_timeout", "user": meta["mxid"], "room": vroom})
+            dirty = True
+    return dirty
+
+
+# --- Lobby flow (POST /join/api → fresh public room → haiku → space) ---
+#
+# Replaces the knock dance for users who get the /join?code=… link. Each
+# code-use mints one fresh public room. The bot waits for the user to join
+# via the matrix.to URL, posts a wikipedia-fact haiku challenge, and on a
+# valid haiku invites them to the space. On promotion the bot leaves the
+# room — no admin remains, the room dies naturally.
+
+def _rand_alias_suffix():
+    """Lowercase alphanumeric suffix safe for a room alias localpart."""
+    raw = secrets.token_urlsafe(8).lower()
+    s = "".join(c for c in raw if c.isalnum())
+    return (s or secrets.token_hex(5))[:10]
+
+
+async def _create_lobby_room_raw(code):
+    """Create a public room with a random alias using the admin token.
+
+    Returns (room_id, alias_local). Raises on failure.
+    """
+    alias_local = f"{LOBBY_ALIAS_PREFIX}{_rand_alias_suffix()}"
+    body = {
+        "preset": "public_chat",       # join_rule=public, history=shared
+        "visibility": "private",       # don't list in the public room directory
+        "room_alias_name": alias_local,
+        "name":  "shape-rotator lobby",
+        "topic": "haiku airlock — answer the challenge to be invited to the space.",
+    }
+    async with aiohttp.ClientSession(
+        headers={**AUTH, "Content-Type": "application/json"}
+    ) as s:
+        url = f"{HS}/_matrix/client/v3/createRoom"
+        async with s.post(url, json=body) as r:
+            if r.status != 200:
+                raise RuntimeError(f"createRoom {r.status}: {(await r.text())[:300]}")
+            j = await r.json()
+            return j["room_id"], alias_local
+
+
+async def join_handler(request):
+    """POST /join/api {code} → {url, alias, room_id} or {error}."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    code = (data.get("code") or "").strip()
+    if not code:
+        return web.json_response({"error": "missing_code"}, status=400)
+
+    codes = _load(CODES_PATH)
+    entry = codes.get(code)
+    if not entry or entry.get("uses_remaining", 0) <= 0:
+        audit({"type": "lobby_rejected", "code": code, "why": "invalid_code"})
+        return web.json_response({"error": "invalid_code"}, status=403)
+
+    title, keyword = await _fetch_wiki_challenge()
+    try:
+        room_id, alias_local = await _create_lobby_room_raw(code)
+    except Exception as e:
+        audit({"type": "lobby_room_failed", "code": code, "err": str(e)[:300]})
+        print(f"[lobby] createRoom failed: {e}", flush=True)
+        return web.json_response({"error": "create_failed",
+                                  "detail": str(e)[:200]}, status=500)
+
+    entry["uses_remaining"] -= 1
+    codes[code] = entry
+    _save(CODES_PATH, codes)
+
+    state = _load(LOBBY_PATH)
+    state[room_id] = {
+        "alias": alias_local, "code": code, "created": time.time(),
+        "title": title, "keyword": keyword,
+        "challenged": [],   # mxids we've already posted the challenge to
+        "tries":     {},    # mxid -> tries_left
+        "promoted":  False, # set on first successful promotion
+        "closed":    False, # bot has left, no further processing
+    }
+    _save(LOBBY_PATH, state)
+
+    full_alias = f"#{alias_local}:{SERVER_NAME}"
+    matrix_to = f"https://matrix.to/#/{urllib.parse.quote(full_alias)}"
+    audit({"type": "lobby_created", "room": room_id, "alias": full_alias,
+           "code": code, "title": title, "keyword": keyword})
+    print(f"[lobby] {full_alias} ({code}) -> {room_id} ({title!r}/{keyword})",
+          flush=True)
+    return web.json_response({
+        "url":      matrix_to,
+        "alias":    full_alias,
+        "room_id":  room_id,
+        "title":    title,
+        "keyword":  keyword,
+    })
+
+
+def iter_lobby_rooms(rooms_data, lobby_state):
+    """For each open lobby room we own, yield
+    (room_id, meta, list_of_user_join_events, list_of_user_msg_events).
+
+    We gather joins for users not yet challenged, plus messages from anyone
+    who has already been challenged (so we can vet their haikus).
+    """
+    for room_id, rd in rooms_data.get("join", {}).items():
+        meta = lobby_state.get(room_id)
+        if not meta or meta.get("promoted") or meta.get("closed"):
+            continue
+        new_joins = []
+        for section in ("state", "timeline"):
+            for ev in rd.get(section, {}).get("events", []):
+                if ev.get("type") != "m.room.member":
+                    continue
+                content = ev.get("content") or {}
+                if content.get("membership") != "join":
+                    continue
+                mxid = ev.get("state_key", "")
+                if not mxid or mxid == OUR_MXID:
+                    continue
+                if mxid in meta.get("challenged", []):
+                    continue
+                new_joins.append(ev)
+        msgs = [ev for ev in rd.get("timeline", {}).get("events", [])
+                if ev.get("type") == "m.room.message"
+                and ev.get("sender") != OUR_MXID
+                and ev.get("sender") in meta.get("challenged", [])]
+        if new_joins or msgs:
+            yield room_id, meta, new_joins, msgs
+
+
+async def process_lobby_room(client, room_id, meta, new_joins, msgs):
+    """Handle joins (post challenge) and messages (vet haiku) for one lobby."""
+    keyword = meta["keyword"]
+    title   = meta["title"]
+
+    # Post the haiku challenge to anyone who joined since last cycle.
+    for ev in new_joins:
+        mxid = ev["state_key"]
+        displayname = (ev.get("content") or {}).get("displayname", "")
+        meta.setdefault("challenged", []).append(mxid)
+        meta.setdefault("tries", {})[mxid] = LOBBY_MAX_TRIES
+        meta.setdefault("displaynames", {})[mxid] = displayname
+        await _send_msg_raw(room_id,
+            f"hi {mxid} — quick captcha to keep bots out of shape rotator.\n\n"
+            f"write a 3-line haiku about: {title}\n"
+            f"include the word \"{keyword}\" somewhere.\n"
+            f"reply in this room. {LOBBY_MAX_TRIES} tries.")
+        audit({"type": "lobby_challenge_sent", "user": mxid, "room": room_id,
+               "title": title, "keyword": keyword})
+        print(f"[lobby] challenged {mxid} in {room_id} "
+              f"({title!r} / {keyword})", flush=True)
+
+    # Vet any new messages from already-challenged users.
+    for msg in msgs:
+        mxid = msg["sender"]
+        text = (msg.get("content") or {}).get("body", "")
+        displayname = meta.get("displaynames", {}).get(mxid, "")
+        ok, why = _vet(displayname, text, keyword)
+        if ok:
+            st, body = await _promote(client, mxid)
+            if st == 200:
+                meta["promoted"] = True
+                meta["promoted_at"] = time.time()
+                meta["promoted_user"] = mxid
+                await _send_msg_raw(room_id,
+                    "nice — invited you to shape rotator. see you in the space.")
+                if FEED_ROOM:
+                    haiku_lines = [f"> {l}" for l in (text or "").strip().splitlines()
+                                   if l.strip()]
+                    relay = "\n".join([
+                        f"🌸 {displayname or mxid} ({mxid}) joined Shape Rotator",
+                        f"captcha: write a haiku about \"{title}\" "
+                        f"including the word \"{keyword}\"",
+                        "",
+                        *haiku_lines,
+                    ])
+                    await _send_msg(client, FEED_ROOM, relay)
+                audit({"type": "lobby_promoted", "user": mxid, "room": room_id,
+                       "haiku": text, "title": title, "keyword": keyword})
+                print(f"[lobby promoted] {mxid} ({displayname})", flush=True)
+                # Bot leaves the lobby — no admin remains, room dies naturally.
+                await _leave(client, room_id, reason="lobby done")
+                meta["closed"] = True
+                meta["closed_reason"] = "promoted"
+            else:
+                audit({"type": "lobby_promote_failed", "user": mxid,
+                       "status": st, "body": body[:200]})
+                print(f"[lobby promote failed] {mxid} status={st}", flush=True)
+            return meta
+        meta["tries"][mxid] = meta["tries"].get(mxid, LOBBY_MAX_TRIES) - 1
+        if meta["tries"][mxid] <= 0:
+            await _send_msg_raw(room_id,
+                f"{mxid}: out of tries. get a fresh code and try again.")
+            audit({"type": "lobby_failed", "user": mxid, "room": room_id})
+            # Don't close the whole room on one failure — others might still
+            # try. Just stop processing this user's messages by removing
+            # them from the challenged list so iter_lobby_rooms ignores them.
+            try:
+                meta["challenged"].remove(mxid)
+            except ValueError:
+                pass
+        else:
+            await _send_msg_raw(room_id,
+                f"{mxid}: not yet — {why}. {meta['tries'][mxid]} tries left.")
+    return meta
+
+
+async def cleanup_stale_lobby(client, lobby_state):
+    """Leave lobby rooms older than LOBBY_TIMEOUT with no promotion."""
+    now = time.time()
+    dirty = False
+    for room_id, meta in list(lobby_state.items()):
+        if meta.get("promoted") or meta.get("closed"):
+            continue
+        if now - meta.get("created", 0) > LOBBY_TIMEOUT:
+            await _leave(client, room_id, reason="lobby timeout")
+            meta["closed"] = True
+            meta["closed_reason"] = "timeout"
+            audit({"type": "lobby_timeout", "room": room_id,
+                   "code": meta.get("code")})
             dirty = True
     return dirty
 
@@ -703,6 +969,19 @@ async def sync_loop():
             v_dirty = True
         if v_dirty:
             _save(VETTING_PATH, vetting_state)
+
+        lobby_state = _load(LOBBY_PATH)
+        l_dirty = False
+        for lroom, meta, new_joins, msgs in iter_lobby_rooms(
+                data.get("rooms", {}), lobby_state):
+            updated = await process_lobby_room(client, lroom, meta, new_joins, msgs)
+            if updated is not None:
+                lobby_state[lroom] = updated
+                l_dirty = True
+        if await cleanup_stale_lobby(client, lobby_state):
+            l_dirty = True
+        if l_dirty:
+            _save(LOBBY_PATH, lobby_state)
 
         # Drain queued admin commands (event handler may have populated
         # them with decrypted message events).
@@ -1076,6 +1355,7 @@ async def run_http():
     app = web.Application()
     app.router.add_post("/signup/api",           signup_handler)
     app.router.add_post("/signup/api/crosssign", crosssign_handler)
+    app.router.add_post("/join/api",             join_handler)
     app.router.add_get("/health",                lambda r: web.Response(text="ok"))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -1087,12 +1367,20 @@ async def run_http():
 # --- Main ---
 
 async def main():
-    print(f"approver starting. space={SPACE_ID} signup_enabled={bool(REG_TOKEN)}", flush=True)
-    for p in (CODES_PATH, SIGNUP_PATH, LOG_PATH, VETTING_PATH):
+    global SERVER_NAME
+    if not SERVER_NAME:
+        async with aiohttp.ClientSession(headers=AUTH) as s:
+            async with s.get(f"{HS}/_matrix/client/v3/account/whoami") as r:
+                me = await r.json()
+        SERVER_NAME = me["user_id"].split(":", 1)[1]
+    print(f"approver starting. space={SPACE_ID} signup_enabled={bool(REG_TOKEN)} "
+          f"server_name={SERVER_NAME!r}", flush=True)
+    for p in (CODES_PATH, SIGNUP_PATH, LOG_PATH, VETTING_PATH, LOBBY_PATH):
         p.parent.mkdir(parents=True, exist_ok=True)
     if not CODES_PATH.exists():   _save(CODES_PATH,   {})
     if not SIGNUP_PATH.exists():  _save(SIGNUP_PATH,  {})
     if not VETTING_PATH.exists(): _save(VETTING_PATH, {})
+    if not LOBBY_PATH.exists():   _save(LOBBY_PATH,   {})
     merge_seed(CODES_PATH,  "INITIAL_CODES")
     merge_seed(SIGNUP_PATH, "INITIAL_SIGNUP_CODES")
 
