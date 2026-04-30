@@ -12,6 +12,11 @@ name: deploy
 #   NAMECHEAP_API_KEY        ditto
 #   REGISTRATION_TOKEN       continuwuity registration token
 #   KNOCK_APPROVER_TOKEN     access token of @shape-rotator-2 (PL ≥ 50 in space)
+#   ONBOARDING_BOT_TOKEN     access token of @onboarding-bot (PL ≥ 50 in space).
+#                            Optional — falls back to KNOCK_APPROVER_TOKEN if
+#                            unset, but then the lobby flow shares the
+#                            shape-rotator-2 mxid which the hermes-staging
+#                            Claude agent also uses (= eviction risk).
 #   DSTACK_AUTHORIZED_KEYS   ssh authorized_keys for the CVM (one line)
 #   ONBOARDING_INVITER_MXID  e.g. @socrates1024:matrix.org
 #   SHAPEROTATOR_SPACE_ID    !4FL8uL5OEYL...mm-g (unsuffixed)
@@ -65,6 +70,7 @@ jobs:
           NAMECHEAP_API_KEY: ${{ secrets.NAMECHEAP_API_KEY }}
           REGISTRATION_TOKEN: ${{ secrets.REGISTRATION_TOKEN }}
           KNOCK_APPROVER_TOKEN: ${{ secrets.KNOCK_APPROVER_TOKEN }}
+          ONBOARDING_BOT_TOKEN: ${{ secrets.ONBOARDING_BOT_TOKEN }}
           DSTACK_AUTHORIZED_KEYS: ${{ secrets.DSTACK_AUTHORIZED_KEYS }}
           ONBOARDING_INVITER_MXID: ${{ secrets.ONBOARDING_INVITER_MXID }}
           SHAPEROTATOR_SPACE_ID: ${{ secrets.SHAPEROTATOR_SPACE_ID }}
@@ -79,6 +85,7 @@ jobs:
             echo "NAMECHEAP_API_KEY=$NAMECHEAP_API_KEY"
             echo "REGISTRATION_TOKEN=$REGISTRATION_TOKEN"
             echo "KNOCK_APPROVER_TOKEN=$KNOCK_APPROVER_TOKEN"
+            echo "ONBOARDING_BOT_TOKEN=$ONBOARDING_BOT_TOKEN"
             echo "DSTACK_AUTHORIZED_KEYS=$DSTACK_AUTHORIZED_KEYS"
             echo "ONBOARDING_INVITER_MXID=$ONBOARDING_INVITER_MXID"
             echo "SHAPEROTATOR_SPACE_ID=$SHAPEROTATOR_SPACE_ID"
