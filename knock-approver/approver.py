@@ -440,6 +440,14 @@ async def _create_lobby_room_raw(code):
     """Create a public room with a random alias using the admin token.
 
     Returns (room_id, alias_local). Raises on failure.
+
+    Pinned to room_version=11 because continuwuity's default (room_v12)
+    produced rooms the local homeserver did not authoritatively own,
+    causing a federated user joining the room to leave the bot's local
+    membership state desynced (404 on m.room.member queries, 403
+    "Event is not authorized" on subsequent sends, M_NOT_FOUND on
+    /join). Pinning to v11 keeps the room firmly local-authoritative
+    and the federation path well-trodden.
     """
     alias_local = f"{LOBBY_ALIAS_PREFIX}{_rand_alias_suffix()}"
     body = {
@@ -448,6 +456,7 @@ async def _create_lobby_room_raw(code):
         "room_alias_name": alias_local,
         "name":  "shape-rotator lobby",
         "topic": "haiku airlock — answer the challenge to be invited to the space.",
+        "room_version": "11",
     }
     async with aiohttp.ClientSession(
         headers={**AUTH, "Content-Type": "application/json"}
@@ -457,7 +466,17 @@ async def _create_lobby_room_raw(code):
             if r.status != 200:
                 raise RuntimeError(f"createRoom {r.status}: {(await r.text())[:300]}")
             j = await r.json()
-            return j["room_id"], alias_local
+            room_id = j["room_id"]
+        # Belt-and-suspenders: explicitly /join the room. createRoom
+        # auto-joins the creator, but if anything goes sideways with
+        # room state federation, this re-asserts the bot's local
+        # member event so subsequent sends are authorized.
+        join_url = f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/join"
+        async with s.post(join_url, json={}) as r:
+            if r.status != 200:
+                print(f"[lobby] post-create join warn ({r.status}): "
+                      f"{(await r.text())[:200]}", flush=True)
+        return room_id, alias_local
 
 
 async def join_handler(request):
