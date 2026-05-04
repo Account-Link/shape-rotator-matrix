@@ -154,6 +154,19 @@ VETTING_MAX_TRIES = int(os.environ.get("VETTING_MAX_TRIES",   "3"))
 LOBBY_PATH         = Path(os.environ.get("LOBBY_PATH",        "/data/lobby.json"))
 LOBBY_TIMEOUT      = int(os.environ.get("LOBBY_TIMEOUT_SEC",  "7200"))
 LOBBY_MAX_TRIES    = int(os.environ.get("LOBBY_MAX_TRIES",    "3"))
+# Federated users (matrix.org) can fast-join the lobby before continuwuity
+# has finished propagating room state outward. The first challenge message
+# posted ~immediately after observing the join can race that propagation
+# and never render in the user's client (confirmed via lsdan screenshot
+# 2026-05-04). Mitigations:
+#   LOBBY_CHALLENGE_DELAY_SEC: wait this long after seeing the join before
+#                              posting the first challenge.
+#   LOBBY_RESEND_AFTER_SEC:    if the user has not replied this many seconds
+#                              after the first send, repost the challenge
+#                              once. Capped at LOBBY_MAX_RESENDS=1 per user.
+LOBBY_CHALLENGE_DELAY = int(os.environ.get("LOBBY_CHALLENGE_DELAY_SEC", "5"))
+LOBBY_RESEND_AFTER    = int(os.environ.get("LOBBY_RESEND_AFTER_SEC", "120"))
+LOBBY_MAX_RESENDS     = 1
 LOBBY_ALIAS_PREFIX = os.environ.get("LOBBY_ALIAS_PREFIX", "shape-rotator-lobby-")
 # Server name for room aliases. May be overridden by env; otherwise resolved
 # at startup from /whoami (parsing the homeserver's view of OUR_MXID).
@@ -635,6 +648,9 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
     title   = meta["title"]
 
     # Post the haiku challenge to anyone who joined since last cycle.
+    # The pre-send delay gives federation a few seconds to propagate the
+    # join + initial state to the user's homeserver before the message is
+    # sent (see LOBBY_CHALLENGE_DELAY_SEC docstring near env var).
     for ev in new_joins:
         mxid = ev["state_key"]
         if mxid == lobby_mxid:
@@ -643,11 +659,15 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
         meta.setdefault("challenged", []).append(mxid)
         meta.setdefault("tries", {})[mxid] = LOBBY_MAX_TRIES
         meta.setdefault("displaynames", {})[mxid] = displayname
+        if LOBBY_CHALLENGE_DELAY > 0:
+            await asyncio.sleep(LOBBY_CHALLENGE_DELAY)
         await _send_msg_raw(room_id,
             f"hi {mxid} — responsiveness check — confirms someone (human or agent) is on the line.\n\n"
             f"write a 3-line haiku about: {title}\n"
             f"include the word \"{keyword}\" somewhere.\n"
             f"reply in this room. {LOBBY_MAX_TRIES} tries.")
+        meta.setdefault("challenge_sent_ts", {})[mxid] = time.time()
+        meta.setdefault("challenge_resends", {})[mxid] = 0
         audit({"type": "lobby_challenge_sent", "user": mxid, "room": room_id,
                "title": title, "keyword": keyword})
         print(f"[lobby] challenged {mxid} in {room_id} "
@@ -712,6 +732,62 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
             await _send_msg_raw(room_id,
                 f"{mxid}: not yet — {why}. {meta['tries'][mxid]} tries left.")
     return meta
+
+
+async def process_lobby_resends(lobby_state):
+    """Re-post the haiku challenge for users who joined but never replied.
+
+    Walks all open lobby rooms (the per-/sync iter_lobby_rooms only yields
+    rooms with new events, so we sweep separately). For each challenged user
+    who has not attempted a haiku and whose first challenge was sent more
+    than LOBBY_RESEND_AFTER seconds ago, post the challenge again. Capped
+    at LOBBY_MAX_RESENDS per user.
+
+    Motivation: continuwuity → matrix.org federation occasionally drops the
+    initial challenge message when the user fast-joined seconds earlier
+    (see LOBBY_CHALLENGE_DELAY_SEC docstring). The resend is the only
+    proxy we have for "did the message land," since the sender homeserver
+    doesn't surface federation delivery acks.
+    """
+    now = time.time()
+    dirty = False
+    for room_id, meta in list(lobby_state.items()):
+        if meta.get("promoted") or meta.get("closed"):
+            continue
+        title = meta.get("title")
+        keyword = meta.get("keyword")
+        if not title or not keyword:
+            continue
+        sent_ts = meta.get("challenge_sent_ts", {})
+        resends = meta.setdefault("challenge_resends", {})
+        for mxid in list(meta.get("challenged", [])):
+            if resends.get(mxid, 0) >= LOBBY_MAX_RESENDS:
+                continue
+            if mxid not in sent_ts:
+                # Pre-existing room from before this patch — skip rather
+                # than spam the user with a stale challenge.
+                continue
+            if now - sent_ts[mxid] < LOBBY_RESEND_AFTER:
+                continue
+            # Has the user attempted a haiku yet? tries[mxid] starts at
+            # LOBBY_MAX_TRIES and only decrements on a (failed) reply.
+            tries_left = meta.get("tries", {}).get(mxid, LOBBY_MAX_TRIES)
+            if tries_left != LOBBY_MAX_TRIES:
+                continue
+            await _send_msg_raw(room_id,
+                f"hi {mxid} — re-sending in case the first message didn't reach you.\n\n"
+                f"write a 3-line haiku about: {title}\n"
+                f"include the word \"{keyword}\" somewhere.\n"
+                f"reply in this room. {LOBBY_MAX_TRIES} tries.")
+            sent_ts[mxid] = now
+            meta["challenge_sent_ts"] = sent_ts
+            resends[mxid] = resends.get(mxid, 0) + 1
+            audit({"type": "lobby_challenge_resent", "user": mxid,
+                   "room": room_id, "attempt": resends[mxid]})
+            print(f"[lobby] resent challenge to {mxid} in {room_id} "
+                  f"(attempt {resends[mxid]})", flush=True)
+            dirty = True
+    return dirty
 
 
 async def cleanup_stale_lobby(lobby_state):
@@ -820,6 +896,8 @@ async def lobby_sync_loop():
             if updated is not None:
                 lobby_state[lroom] = updated
                 l_dirty = True
+        if await process_lobby_resends(lobby_state):
+            l_dirty = True
         if await cleanup_stale_lobby(lobby_state):
             l_dirty = True
         if l_dirty:
