@@ -252,6 +252,26 @@ async def _lobby_invite_to_space(mxid):
             return r.status, (await r.text())[:300]
 
 
+async def _invite_to_children(mxid):
+    """Invite mxid to each SPACE_CHILD_IDS room using the main bot (TOKEN),
+    which has admin PL across the children. Lobby users are typically
+    remote (matrix.org), so we can't join on their behalf the way the
+    signup flow does — we invite, and they accept.
+
+    Returns list of child IDs successfully invited (status 200) or already
+    a member (status 403). Per-child errors are logged but don't fail the
+    overall promotion."""
+    invited = []
+    for child in SPACE_CHILD_IDS:
+        st, body = await _admin_invite(mxid, child, reason="vetted via lobby airlock")
+        if st in (200, 403):
+            invited.append(child)
+        else:
+            print(f"[lobby] child {child} invite of {mxid} -> {st}: {body[:200]}",
+                  flush=True)
+    return invited
+
+
 async def _lobby_leave_room(room_id, reason="lobby done"):
     """Leave a lobby room as the lobby/onboarding bot. Best-effort —
     swallow errors so a failed leave doesn't strand the lobby state."""
@@ -418,6 +438,8 @@ async def process_vetting_room(client, room_id, meta, join_ev, msgs):
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["displayname"] = displayname
+                invited_children = await _invite_to_children(meta["mxid"])
+                meta["invited_children"] = invited_children
                 await _send_msg(client, room_id,
                     "nice — invited you to shape rotator. you can leave this room.")
                 # Relay the captcha + haiku to FEED_ROOM so the rest of
@@ -696,6 +718,7 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["promoted_user"] = mxid
+                invited_children = await _invite_to_children(mxid)
                 ack = ("you're already in shape rotator — see you in the space."
                        if already_member else
                        "nice — invited you to shape rotator. see you in the space.")
@@ -706,9 +729,11 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
                 # if you want this back, handle it via the main sync_loop.
                 audit({"type": "lobby_promoted", "user": mxid, "room": room_id,
                        "haiku": text, "title": title, "keyword": keyword,
-                       "already_member": already_member})
+                       "already_member": already_member,
+                       "invited_children": invited_children})
                 print(f"[lobby promoted] {mxid} ({displayname})"
-                      f"{' (already in space)' if already_member else ''}",
+                      f"{' (already in space)' if already_member else ''}"
+                      f" children={len(invited_children)}/{len(SPACE_CHILD_IDS)}",
                       flush=True)
                 await _lobby_leave_room(room_id, reason="lobby done")
                 meta["closed"] = True
@@ -923,6 +948,16 @@ ADMIN_ALLOWLIST = set(
 # any other cleartext room id to redirect.
 FEED_ROOM = os.environ.get("FEED_ROOM") or ADMIN_COMMAND_ROOM
 
+# Where to post "X started lobby" / "lobby failed" operator notifications.
+# Defaults to FEED_ROOM (matrix-devops). Set to a private DM room id with
+# the bot to keep these out of the public feed.
+OPERATOR_NOTIFY_ROOM = os.environ.get("OPERATOR_NOTIFY_ROOM") or FEED_ROOM
+# Sidecar bookkeeping for which lobby events have already been announced
+# to OPERATOR_NOTIFY_ROOM. Kept separate from LOBBY_PATH so the
+# lobby_sync_loop and sync_loop never write the same JSON file.
+OPERATOR_ANNOUNCE_PATH = Path(os.environ.get(
+    "OPERATOR_ANNOUNCE_PATH", "/data/operator_announce.json"))
+
 # Filled at startup by /whoami so we can skip our own messages in the
 # command room (we'd otherwise process replies we just sent).
 OUR_MXID = ""
@@ -1103,6 +1138,62 @@ async def process_admin_command(client, room_id, event_id, sender, body):
     await _send_msg(client, room_id, result)
 
 
+async def announce_lobby_events(client):
+    """Scan lobby_state and emit operator notifications for new joins
+    (challenged users) and lobby failures. Posts to OPERATOR_NOTIFY_ROOM
+    via the main bot's E2EE-aware client. Idempotent — uses a sidecar
+    JSON file so the lobby loop never has to know about announce flags."""
+    if not OPERATOR_NOTIFY_ROOM:
+        return
+    lobby_state = _load(LOBBY_PATH)
+    if not lobby_state:
+        return
+    # First-run backfill suppression: if the announce file doesn't exist
+    # yet, seed it with everything currently in lobby_state marked as
+    # already-announced. Otherwise the first cycle after deploy would
+    # spam ~20 retroactive "X started" messages for historical lobbies.
+    first_run = not OPERATOR_ANNOUNCE_PATH.exists()
+    seen = _load(OPERATOR_ANNOUNCE_PATH)
+    if first_run:
+        for room_id, meta in lobby_state.items():
+            seen[room_id] = {
+                "started": list(meta.get("challenged", [])),
+                "failed":  bool(meta.get("closed")
+                                and meta.get("closed_reason") not in (None, "promoted", "already_member")),
+            }
+        _save(OPERATOR_ANNOUNCE_PATH, seen)
+        return
+    dirty = False
+    for room_id, meta in lobby_state.items():
+        rec = seen.setdefault(room_id, {"started": [], "failed": False})
+        for mxid in meta.get("challenged", []):
+            if mxid in rec["started"]:
+                continue
+            displayname = (meta.get("displaynames") or {}).get(mxid, "")
+            label = f"{displayname} ({mxid})" if displayname else mxid
+            await _send_msg(client, OPERATOR_NOTIFY_ROOM,
+                f"🚪 {label} started lobby flow (code={meta.get('code', '?')})")
+            rec["started"].append(mxid)
+            dirty = True
+        if (meta.get("closed") and not rec["failed"]
+                and meta.get("closed_reason") not in (None, "promoted", "already_member")):
+            users = ", ".join(meta.get("challenged", []) or ["(no users joined)"])
+            await _send_msg(client, OPERATOR_NOTIFY_ROOM,
+                f"⚠️ lobby failed for {users} "
+                f"(reason={meta.get('closed_reason')}, code={meta.get('code', '?')})")
+            rec["failed"] = True
+            dirty = True
+    # Garbage-collect bookkeeping for closed lobbies — no further events
+    # will fire for them, so the announce record is no longer needed.
+    for room_id in list(seen.keys()):
+        meta = lobby_state.get(room_id)
+        if meta is None or meta.get("closed"):
+            seen.pop(room_id, None)
+            dirty = True
+    if dirty:
+        _save(OPERATOR_ANNOUNCE_PATH, seen)
+
+
 # Helper for OlmMachine. Tracks which rooms we're joined to so the
 # crypto state store can answer find_shared_rooms.
 class _StateStore:
@@ -1247,6 +1338,15 @@ async def sync_loop():
         # Lobby flow runs in its own /sync loop (lobby_sync_loop) under the
         # dedicated onboarding-bot identity (LOBBY_TOKEN), so it doesn't appear
         # here. See lobby_sync_loop() below.
+
+        # Operator notifications about lobby starts + failures. The lobby
+        # bot can't post to OPERATOR_NOTIFY_ROOM (which is typically E2EE
+        # and only the main bot has keys for), so the main bot scans
+        # lobby_state each cycle and emits the announcements itself.
+        try:
+            await announce_lobby_events(client)
+        except Exception as e:
+            print(f"[announce_lobby_events] {type(e).__name__}: {e}", flush=True)
 
         # Drain queued admin commands (event handler may have populated
         # them with decrypted message events).
