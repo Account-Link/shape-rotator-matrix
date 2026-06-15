@@ -127,6 +127,22 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 LOBBY_TOKEN = os.environ.get("ONBOARDING_BOT_TOKEN", "").strip() or TOKEN
 LOBBY_AUTH  = {"Authorization": f"Bearer {LOBBY_TOKEN}"}
 
+# --- Bot-mediated device login (issue #46) ---
+# Password-free login for the desktop app: the desktop calls /device-login/start
+# to get a one-time code, the user DMs that code to this bot from their phone,
+# the bot mints an m.login.token for the *verified sender* via the privileged
+# continuwuity endpoint (guarded by MINT_TOKEN_SECRET, shared with the
+# homeserver's mint_login_token_secret), and the desktop polls /device-login/poll
+# to collect it. Feature is off unless MINT_TOKEN_SECRET is set.
+MINT_TOKEN_SECRET = os.environ.get("MINT_TOKEN_SECRET", "").strip()
+DEVICE_LOGIN_TTL  = int(os.environ.get("DEVICE_LOGIN_TTL", "300"))  # seconds
+# Cap auto-joins of fresh DM invites so a flood of invites can't force the bot
+# to join arbitrarily many rooms. N joins per rolling 60s window.
+DEVICE_LOGIN_JOIN_CAP = int(os.environ.get("DEVICE_LOGIN_JOIN_CAP", "10"))
+_AUTOJOIN_TIMES = []
+# code -> {"status": pending|approved|consumed, "sender", "login_token", "expires_at", "room_id"}
+DEVICE_LOGINS = {}
+
 
 async def _login_with_password(username, password, device_id=None):
     """POST /login as username/password. If device_id is given, Matrix returns
@@ -1329,6 +1345,17 @@ async def cmd_help(client, room_id, sender, args):
 COMMANDS["!help"] = cmd_help
 
 
+async def _safe_send(client, room_id, text, label):
+    # An admin-reply send failure (e.g. M_FORBIDDEN in a newly-encrypted
+    # room) must not crash the sync loop — that would also take down the
+    # /join/api web server, which shares the asyncio runtime.
+    try:
+        await _send_msg(client, room_id, text)
+    except Exception as e:
+        print(f"[{label}] send to {room_id} failed: {type(e).__name__}: {e}",
+              flush=True)
+
+
 async def process_admin_command(client, room_id, event_id, sender, body):
     if not OUR_MXID:
         # /whoami failed at startup; refuse to process anything to avoid
@@ -1345,8 +1372,9 @@ async def process_admin_command(client, room_id, event_id, sender, body):
     is_admin = await _is_admin(client, room_id, sender)
     print(f"[admin] dispatch {cmd} from {sender} is_admin={is_admin}", flush=True)
     if not is_admin:
-        await _send_msg(client, room_id,
-            f"{sender}: refused — need PL >= {ADMIN_PL_THRESHOLD} or be on the allowlist")
+        await _safe_send(client, room_id,
+            f"{sender}: refused — need PL >= {ADMIN_PL_THRESHOLD} or be on the allowlist",
+            "admin-refusal")
         audit({"type": "admin_refused", "cmd": cmd, "sender": sender})
         return
     try:
@@ -1355,7 +1383,7 @@ async def process_admin_command(client, room_id, event_id, sender, body):
         result = f"!{cmd[1:]} failed: {type(e).__name__}: {e}"
         print(f"[admin] {cmd} crashed: {e}", flush=True)
     print(f"[admin] sending reply: {result[:120]!r}", flush=True)
-    await _send_msg(client, room_id, result)
+    await _safe_send(client, room_id, result, "admin-reply")
 
 
 async def announce_lobby_events(client):
@@ -1498,16 +1526,17 @@ async def sync_loop():
         try:
             ev_room = str(evt.room_id)
             ev_sender = str(evt.sender)
-            if ev_room != ADMIN_COMMAND_ROOM:
-                return
             if ev_sender == OUR_MXID:
                 return
             body = (getattr(evt.content, "body", "") or "").strip()
-            if not body.startswith("!"):
+            if ev_room == ADMIN_COMMAND_ROOM:
+                if body.startswith("!"):
+                    await admin_queue.put((str(evt.event_id), ev_sender, body))
                 return
-            await admin_queue.put((str(evt.event_id), ev_sender, body))
+            # Any other room: a DM may carry a device-login code (issue #46).
+            await maybe_approve_device_login(ev_sender, body, ev_room)
         except Exception as e:
-            print(f"[admin handler] {type(e).__name__}: {e}", flush=True)
+            print(f"[msg handler] {type(e).__name__}: {e}", flush=True)
 
     client.add_event_handler(_MAU_EventType.ROOM_MESSAGE, on_room_message)
 
@@ -1547,6 +1576,30 @@ async def sync_loop():
                 await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as e:
             print(f"[handle_sync error] {type(e).__name__}: {e}", flush=True)
+
+        # Device-login (issue #46): auto-join fresh DM invites so we can read the
+        # code the user sends. Only direct invites, only when the feature is on.
+        if MINT_TOKEN_SECRET:
+            for inv_room, inv in data.get("rooms", {}).get("invite", {}).items():
+                evs = inv.get("invite_state", {}).get("events", [])
+                is_direct = any(
+                    e.get("type") == "m.room.member"
+                    and e.get("state_key") == OUR_MXID
+                    and (e.get("content") or {}).get("is_direct") is True
+                    for e in evs)
+                if not is_direct:
+                    continue
+                now = time.time()
+                _AUTOJOIN_TIMES[:] = [t for t in _AUTOJOIN_TIMES if now - t < 60]
+                if len(_AUTOJOIN_TIMES) >= DEVICE_LOGIN_JOIN_CAP:
+                    print(f"[device-login] join cap hit, skipping {inv_room}", flush=True)
+                    continue
+                _AUTOJOIN_TIMES.append(now)
+                try:
+                    await client.api.request("POST", f"/_matrix/client/v3/join/{inv_room}")
+                    print(f"[device-login] joined DM {inv_room}", flush=True)
+                except Exception as e:
+                    print(f"[device-login] join {inv_room} failed: {e}", flush=True)
 
         # Cleartext flows — knock events on the space + vetting rooms.
         for room_id, user_id, reason in iter_knock_events(data.get("rooms", {})):
@@ -1602,6 +1655,95 @@ async def _admin_invite(mxid, room_id, reason="signup auto-invite"):
         url = f"{HS}/_matrix/client/v3/rooms/{room_id}/invite"
         async with s.post(url, json={"user_id": mxid, "reason": reason}) as r:
             return r.status, await r.text()
+
+# --- device-login relay (issue #46) ---
+
+async def _mint_login_token(mxid):
+    """Call the privileged continuwuity endpoint to mint an m.login.token for an
+    already-verified local user. Returns (status, login_token | error_text)."""
+    async with aiohttp.ClientSession(headers={
+        "Authorization": f"Bearer {MINT_TOKEN_SECRET}",
+        "Content-Type": "application/json",
+    }) as s:
+        async with s.post(f"{HS}/_conduwuit/mint_login_token",
+                          json={"user_id": mxid}) as r:
+            if r.status == 200:
+                return 200, (await r.json()).get("login_token")
+            return r.status, (await r.text())[:200]
+
+
+async def _leave_room(room_id):
+    """Leave a room as the bot (own MATRIX_TOKEN). Plain state op, no E2EE."""
+    async with aiohttp.ClientSession(headers={**AUTH, "Content-Type": "application/json"}) as s:
+        async with s.post(f"{HS}/_matrix/client/v3/rooms/{room_id}/leave", json={}) as r:
+            return r.status, await r.text()
+
+
+def _prune_device_logins():
+    now = time.time()
+    for code in [c for c, e in DEVICE_LOGINS.items() if e["expires_at"] < now]:
+        del DEVICE_LOGINS[code]
+
+
+async def device_login_start(request):
+    """Desktop asks for a one-time code to show as a QR. Returns the code plus a
+    matrix.to deep link to this bot so the phone can open a DM and send it."""
+    if not MINT_TOKEN_SECRET:
+        return web.json_response({"error": "device_login_disabled"}, status=503)
+    _prune_device_logins()
+    code = "SRDL-" + secrets.token_hex(4).upper()
+    DEVICE_LOGINS[code] = {"status": "pending", "sender": None,
+                           "login_token": None, "expires_at": time.time() + DEVICE_LOGIN_TTL,
+                           "room_id": None}
+    bot = OUR_MXID or ""
+    return web.json_response({
+        "code": code,
+        "bot_mxid": bot,
+        "matrix_to": f"https://matrix.to/#/{bot}",
+        "expires_in": DEVICE_LOGIN_TTL,
+    })
+
+
+async def device_login_poll(request):
+    """Desktop polls with its code; once the phone has approved, returns the
+    login_token exactly once (status flips to consumed)."""
+    code = (request.query.get("code") or "").strip()
+    _prune_device_logins()
+    entry = DEVICE_LOGINS.get(code)
+    if not entry:
+        return web.json_response({"status": "expired"}, status=404)
+    if entry["status"] == "approved":
+        entry["status"] = "consumed"
+        return web.json_response({"status": "approved",
+                                  "login_token": entry["login_token"]})
+    return web.json_response({"status": entry["status"]})
+
+
+async def maybe_approve_device_login(sender, body, room_id):
+    """A DM arrived from `sender`. If its body is a pending device-login code,
+    mint a login token for that verified sender and mark the code approved."""
+    if not MINT_TOKEN_SECRET:
+        return
+    code = body.strip().split()[-1] if body.strip() else ""
+    _prune_device_logins()
+    entry = DEVICE_LOGINS.get(code)
+    if not entry or entry["status"] != "pending":
+        return
+    st, result = await _mint_login_token(sender)
+    if st != 200:
+        audit({"type": "device_login_mint_failed", "sender": sender,
+               "status": st, "body": str(result)})
+        print(f"[device-login] mint for {sender} -> {st}: {result}", flush=True)
+        return
+    entry.update(status="approved", sender=sender, login_token=result, room_id=room_id)
+    audit({"type": "device_login_approved", "sender": sender, "code": code})
+    print(f"[device-login] approved {sender} (code {code})", flush=True)
+    # The DM has served its purpose; leave so we don't accumulate membership.
+    try:
+        await _leave_room(room_id)
+    except Exception as e:
+        print(f"[device-login] leave {room_id} failed: {e}", flush=True)
+
 
 async def _as_user(access_token, method, path, body=None):
     """Make a request as the freshly-registered user."""
@@ -1951,6 +2093,8 @@ async def run_http():
     app.router.add_post("/signup/api",           signup_handler)
     app.router.add_post("/signup/api/crosssign", crosssign_handler)
     app.router.add_post("/join/api",             join_handler)
+    app.router.add_post("/device-login/start",   device_login_start)
+    app.router.add_get("/device-login/poll",     device_login_poll)
     app.router.add_get("/health",                lambda r: web.Response(text="ok"))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -2019,11 +2163,21 @@ async def main():
     merge_seed(SIGNUP_PATH, "INITIAL_SIGNUP_CODES")
 
     await run_http()
-    # Run main sync_loop (knocks, vetting, admin commands) and lobby_sync_loop
-    # (dedicated onboarding-bot identity for the lobby flow) in parallel.
-    # If LOBBY_TOKEN == TOKEN (no dedicated bot configured), both loops sync
-    # the same user — works but wasteful; configure ONBOARDING_BOT_TOKEN.
-    await asyncio.gather(sync_loop(), lobby_sync_loop())
+    # Supervisor: a crash in either loop must NOT take down the asyncio
+    # runtime (which would also kill the /join/api web server started
+    # above). Log the exception, sleep, restart the loop.
+    async def _supervised(name, factory):
+        while True:
+            try:
+                await factory()
+            except Exception as e:
+                print(f"[supervisor] {name} crashed: {type(e).__name__}: {e}; "
+                      f"restarting in 5s", flush=True)
+                await asyncio.sleep(5)
+    await asyncio.gather(
+        _supervised("sync_loop", sync_loop),
+        _supervised("lobby_sync_loop", lobby_sync_loop),
+    )
 
 if __name__ == "__main__":
     try:
