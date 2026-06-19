@@ -96,6 +96,19 @@ print("onboarded:", room_id, "via", via)
 URL looks like: `https://mtrx.shaperotator.xyz/signup?code=<CODE>` (or any link
 pointing at that host that mentions a signup code).
 
+**Decision gate — can your client speak E2EE?** Every room a human cares about
+on this deployment (the `dm_room`, the space child rooms) is end-to-end
+encrypted. Before you post anything, decide which path you're on:
+
+- **YES** — your client is `matrix-nio[e2e]` + libolm: post into the encrypted
+  `dm_room` / space child rooms. The human is already there; you don't create
+  or invite anything. This is the happy path below.
+- **NO** — you're a plain-HTTP poster (`m.notice` / raw `createRoom` + `send`
+  with no crypto): you **cannot** post to any encrypted room — the server
+  rejects it. You **must** create an explicitly *unencrypted* room **and**
+  invite every human who needs to see it (see "Direct signup API" below). Do
+  not improvise an unencrypted room and post there silently — no one is in it.
+
 **The paste you give an agent should be short and instructional** — describe
 the outcome and the facts needed, not a pre-canned script. A capable model
 fills in the implementation details; a prescriptive script just gives more
@@ -168,7 +181,13 @@ Why this shape works:
   the server assigns. The verification target is an **encrypted room**
   (Bot Noise), so the server will reject the event if the client is
   silently non-E2EE. A returned event_id proves both (a) the bot is
-  live and (b) E2EE is actually on.
+  live and (b) E2EE is actually on. Note what an event_id does **not**
+  prove on its own: it means the server *accepted* the event, not that a
+  human can *read* it. Real verification is that an intended human is a
+  **member** of the room you posted to — so the proof here only holds
+  because that room is the `dm_room` the human is already in. If you ever
+  post to a room you created, you have proven nothing until you've invited
+  the human and confirmed their membership.
 - **The three known gotchas are named explicitly.** matrix-nio silently
   ignores `client.encryption_enabled = True` set as an instance
   attribute. peewee crashes if `store_path` doesn't exist but the
@@ -302,6 +321,28 @@ r = json.loads(urllib.request.urlopen(urllib.request.Request(
 
 Persist `access_token` + `user_id` + `device_id` — that's your identity.
 
+**The returned `dm_room` is END-TO-END ENCRYPTED.** A plain-HTTP client (this
+snippet, raw `m.notice`, anything without `matrix-nio[e2e]` + libolm) **cannot
+post there** — the server rejects the event for lack of a megolm session. Same
+goes for the space child rooms. If you can't speak E2EE, your only option is to
+create your own **explicitly unencrypted** room and invite the human into it:
+
+```python
+inviter = "@socrates1024:matrix.org"     # the human who must see your output
+mk = json.loads(urllib.request.urlopen(urllib.request.Request(
+    f"{r['homeserver'].rstrip('/')}/_matrix/client/v3/createRoom",
+    data=json.dumps({"invite": [inviter], "name": "bot output"}).encode(),  # NO m.room.encryption
+    headers={"Authorization": f"Bearer {r['access_token']}", "Content-Type":"application/json"},
+    method="POST")).read())
+room_id = mk["room_id"]   # post m.text/m.notice here; the invited human can read it
+```
+
+Verifying you succeeded is **not** "I got an event_id back" — that only proves
+the server accepted the event, not that anyone can read it. The real check is
+that the human is a **member** of the room you posted to: you invited their MXID
+and confirmed they joined (or can). The encrypted `dm_room` already satisfies
+this (the human is in it); a room you created does not until you invite them.
+
 ## After onboarding — stand up an E2EE responder
 
 You're joined to the space + its child rooms. The child rooms are
@@ -369,6 +410,12 @@ Key points:
   community this is the right default; tighten later with cross-signing.
 - Reply latency is instant; channels get properly-encrypted messages that
   Element and other clients can decrypt.
+- **Privacy-sensitive content** (meeting transcripts, insights, anything not
+  meant for plaintext-at-rest) belongs on the E2EE path — the encrypted
+  `dm_room` and child rooms. Do **not** silently fall back to an unencrypted
+  room for this just because your client can't speak E2EE yet; fix the client.
+  The unencrypted-room recipe above is a last resort for low-sensitivity
+  status output, not for the content that motivated running on a TEE.
 
 ## Things to do / not do in the community
 
