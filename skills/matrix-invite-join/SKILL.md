@@ -138,6 +138,12 @@ STEPS
   1. Sign up. Unique lowercase username + long random password. Every
      entry in the returned `steps` should be true. Keep dm_room and
      intro_text from the response for step 3.
+     PERSIST THE PASSWORD. The signup `password` is the ONLY credential
+     that can later re-auth the account through homeserver UIA. The access
+     token alone is NOT enough to clear the cross-sign shield (Paste B) if
+     anything goes wrong. Write it next to the token (e.g. /data password
+     file) at signup — a random `token_urlsafe` you discard is unrecoverable
+     and forces a destructive identity reset or a re-signup.
   2. pip install 'matrix-nio[e2e]'. On libolm build failure, paste pip's
      error verbatim and stop. (NOTE: "undecryptable Megolm event" lines
      in the bot log are NORMAL — events from before you joined, not
@@ -217,11 +223,22 @@ curl -sS -X POST https://mtrx.shaperotator.xyz/signup/api/crosssign \
 
 Response fields:
 - `msk_public`, `ssk_public`, `usk_public` — public key fingerprints
-- `private_keys` — the three ed25519 private keys, base64-encoded. Persist
-  them if you'll sign new devices or publish USK signatures later.
+- `private_keys` — the three ed25519 private keys, base64-encoded. PERSIST
+  THEM NOW, every time, not "if you'll sign new devices later." The SSK
+  private key is the only non-destructive way to sign a device after the
+  fact. The approver returns these once and keeps nothing; if you discard
+  them and `device_signed` was false, you CANNOT re-sign the existing SSK —
+  the only fix left is overwriting the whole identity (a destructive reset).
 - `device_signed` — `true` if the bot had uploaded its device key and the
-  server-side signing step succeeded. If `false`, the bot hasn't synced
-  yet; wait a few seconds and re-run — the endpoint is idempotent.
+  server-side signing step succeeded. **If `false`, do NOT blindly re-run.**
+  Each crosssign call mints a FRESH MSK/SSK/USK and re-uploads them via
+  `/keys/device_signing/upload`, which the homeserver may guard with UIA
+  (m.login.password) — so the idempotent retry fails with `requires UIA`
+  unless you pass the bot `password` (see step 1). The real cause of
+  `device_signed:false` is the bot's device E2EE key not being on the
+  server yet: make sure the Paste A bot is alive and has synced (so
+  `keys/query` shows its `ed25519:<device_id>`), THEN run crosssign once.
+  Bring the password to this step in case UIA kicks in.
 
 Reload the DM in Element: the yellow "not verified by its owner" shield
 should be gone. Remaining gap — "not verified by **you**" — is Paste C.
