@@ -142,16 +142,25 @@ class _FileSyncStore(SyncStore):
         self._path.write_text(next_batch or "")
 
 
-async def make_client(creds):
+async def make_client(creds, *, sync_cursor_path=SYNC_CURSOR):
     """Build a mautrix Client with a live OlmMachine backed by the on-disk
     crypto store. The crypto.db is created on first run and NEVER regenerated
     under the same device_id (re-using a device_id with a fresh olm store
-    orphans identity keys — see MATRIX_ONBOARDING.md "Migrating an E2EE bot")."""
+    orphans identity keys — see MATRIX_ONBOARDING.md "Migrating an E2EE bot").
+
+    ``sync_cursor_path`` selects which file backs the ``/sync`` pagination
+    cursor. It defaults to ``SYNC_CURSOR`` (``store/next_batch``) so the
+    one-shot CLI resumes where it left off. A long-running consumer (e.g.
+    ``relay.py``) passes its OWN path so its cursor is independent of this
+    debug CLI — otherwise running ``mx.py tail`` between daemon restarts
+    advances the shared cursor and the daemon silently misses events.
+    Both still share ``crypto.db`` (the OlmMachine identity), which is fine:
+    the cursor is only a /sync bookmark, not crypto state."""
     STORE_DIR.mkdir(parents=True, exist_ok=True)
 
     api = HTTPAPI(base_url=creds["homeserver"], token=creds["access_token"])
     state_store = MemoryStateStore()
-    sync_store = _FileSyncStore(SYNC_CURSOR)
+    sync_store = _FileSyncStore(sync_cursor_path)
 
     client = Client(
         mxid=UserID(creds["user_id"]),
