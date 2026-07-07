@@ -11,6 +11,8 @@ design.
 | `mx.py`   | E2EE Matrix bot CLI — `send` / `tail` the test room |
 | `tg.py`   | Telethon CLI — `send` / `tail` the test group |
 | `relay.py`| Long-running bidirectional relay between the two |
+| `acceptance.sh`        | objective live round-trip + restart gate (issue #53) |
+| `acceptance.Dockerfile`| runner image for `acceptance.sh` (runner + telethon + dotenv) |
 
 ## relay.py
 
@@ -77,6 +79,46 @@ Follows every non-negotiable in `MATRIX_ONBOARDING.md` ("mautrix-python known
 bugs"): wraps `MemoryStateStore` with `is_encrypted` / `find_shared_rooms` /
 `get_encryption_info`, persists `next_batch` every sync, gathers `handle_sync`
 tasks, and uses the unsuffixed Continuwuity room id.
+
+## acceptance.sh
+
+```
+bash bridge/acceptance.sh
+```
+
+The objective live gate for the worker lane (see
+`~/paseo-batch/specs/matrix-ready-worker.md` Step 4). Drives `mx.py`, `tg.py`,
+and `relay.py --once` against the fixture pair and asserts three things:
+
+1. **TG->MX** — the relay polls + handles a Telegram-side message within the
+   <10s budget;
+2. **MX->TG** — symmetric;
+3. **Restart catch-up** — messages queued during "downtime" are caught up
+   **exactly once** across a restart (durable-cursor / dedup contract).
+
+Exits 0 only if every assertion holds; a miss or a hang fails loudly (nonzero
+exit, full mautrix transcript dumped). **It can never wedge the lane** like the
+previous attempt did: it only ever calls `relay.py --once` (a bounded pass,
+never the daemon) and wraps every container call in both `timeout` and
+`docker run --rm`, with a cleanup trap. The full mautrix stderr transcript is
+written to `.acceptance-logs/full.log` (path printed up front); the console
+shows only the bridge signal so a real failure is easy to spot.
+
+**Runs everything in Docker** — the relay needs `mautrix` + `libolm3` (only in
+`tests/Dockerfile`) plus `telethon` + `python-dotenv`. `acceptance.sh` builds
+`tests/Dockerfile` as `shape-bridge-runner`, then layers the two Telethon deps
+via `acceptance.Dockerfile` as `shape-bridge-acceptance`. State dirs
+(`~/.teleport-travel`, `~/.shape-bridge-bot`) are bind-mounted and the process
+runs as the host uid, so state stays host-owned (never root-owned).
+
+**Single-identity scope.** The only provisioned Matrix identity is the bridge
+bot `@shape-bridge` and the only Telegram session is the relay's own account
+(the test group's sole member). Since the relay filters both as
+loop-prevention, a *positive* end-to-end round-trip from a second participant
+isn't drivable from this box — the gate instead asserts the relay properties
+that ARE drivable (loop-prevention + bounded latency + exactly-once restart).
+A positive round-trip needs a second Matrix user + a second Telegram member and
+is tracked as an operator follow-up on issue #53.
 
 ## Dependencies
 

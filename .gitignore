@@ -7,3 +7,4 @@ __pycache__/
 .claude/
 .DS_Store
 deploy/admin/.*-crypto.db
+.acceptance-logs/
