@@ -58,8 +58,10 @@ from mautrix.types import (
     MessageType as _MAU_MessageType,
     TextMessageEventContent as _MAU_TextContent,
     TrustState as _MAU_TrustState,
+    SessionID as _MAU_SessionID,
 )
 from mautrix.crypto import OlmMachine as _MAU_OlmMachine
+from mautrix.crypto.sessions import InboundGroupSession as _MAU_InboundGroupSession
 from mautrix.crypto.store.asyncpg import PgCryptoStore as _MAU_PgCryptoStore
 from mautrix.util.async_db import Database as _MAU_Database
 
@@ -81,6 +83,11 @@ HTTP_PORT     = int(os.environ.get("HTTP_PORT", "8001"))
 # Bot's E2EE crypto store (megolm sessions, identity keys, peer device keys).
 # Lives on the same /data volume so it survives container restarts.
 CRYPTO_DB     = Path(os.environ.get("CRYPTO_DB", "/data/bot_crypto.db"))
+# Durable escrow of inbound megolm sessions, written BEFORE the self-heal
+# crypto wipe and re-imported into the freshly-opened store after re-mint
+# (issue #60). Plaintext is fine: same /data volume + trust domain as
+# bot_crypto.db itself. The file IS the escrow — replaced on each wipe.
+ESCROW_PATH   = Path(os.environ.get("ESCROW_PATH", "/data/inbound_sessions.escrow.json"))
 
 # Persisted bot passwords for self-mint-on-boot. If the env-provided access
 # token is stale (M_UNKNOWN_TOKEN at startup), the bot logs in with the
@@ -269,6 +276,104 @@ def _wipe_crypto_store():
             print(f"[self-heal] removed {p}", flush=True)
         except FileNotFoundError:
             pass
+
+
+# --- Inbound megolm session escrow (issue #60) ---
+#
+# The bot's crypto store is the community's only escrow of historical megolm
+# sessions. The self-heal crypto wipe (_wipe_crypto_store) used to destroy
+# every inbound session on device re-mint, so any future MSC4268 history
+# sharing could only cover messages since the last wipe. These two functions
+# dump all inbound group sessions to ESCROW_PATH before the wipe and reload
+# them into the fresh store after, preserving historical decryptability.
+
+async def export_inbound_sessions(cs, dest=None):
+    """Export every non-withheld inbound megolm group session in `cs` to a
+    JSON file at `dest` (default: the module's ESCROW_PATH, resolved at call
+    time). Called BEFORE _wipe_crypto_store() on device re-mint, so
+    historical messages stay decryptable after the wipe.
+
+    Each entry: room_id / sender_key / signing_key / session_id /
+    first_known_index / session_key, where session_key is the base64
+    ratchet key produced by InboundGroupSession.export_session(index) —
+    the exact primitive from tests/history_e2ee_repro.py check 5 (PR #59).
+
+    The file IS the durable escrow; it is replaced wholesale on each wipe.
+    Returns the number of sessions written. Any failure propagates (a
+    session we cannot read is a bug, not something to skip)."""
+    if dest is None:
+        dest = ESCROW_PATH
+    rows = await cs.db.fetch(
+        "SELECT room_id, session_id FROM crypto_megolm_inbound_session "
+        "WHERE account_id=$1 AND withheld_code IS NULL",
+        cs.account_id)
+    out = []
+    for row in rows:
+        sess = await cs.get_group_session(row["room_id"], row["session_id"])
+        if sess is None:
+            continue
+        out.append({
+            "room_id":          str(sess.room_id),
+            "sender_key":       str(sess.sender_key),
+            "signing_key":      str(sess.signing_key),
+            "session_id":       str(sess.id),
+            "first_known_index": int(sess.first_known_index),
+            "session_key":      sess.export_session(sess.first_known_index),
+        })
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(out))
+    return len(out)
+
+
+async def import_inbound_sessions(cs, src=None):
+    """Import escrowed inbound megolm sessions into a freshly-opened crypto
+    store (called after the new device_id's store is opened, post re-mint).
+    `src` defaults to the module's ESCROW_PATH, resolved at call time.
+
+    A session that fails to import RAISES — no silent skips (issue #60: a
+    silently-dropped escrow entry is a silent loss of history, which is the
+    bug this fixes). If the escrow is corrupt the startup fails loudly so
+    the operator sees it and repairs/removes the file, instead of the bot
+    looking healthy while having lost its history. Returns the count
+    imported; a missing escrow file returns 0 (first boot / nothing to
+    restore)."""
+    if src is None:
+        src = ESCROW_PATH
+    if not src.exists():
+        return 0
+    data = json.loads(src.read_text())
+    n = 0
+    for entry in data:
+        sess = _MAU_InboundGroupSession.import_session(
+            entry["session_key"],
+            signing_key=entry["signing_key"],
+            sender_key=entry["sender_key"],
+            room_id=entry["room_id"])
+        await cs.put_group_session(
+            entry["room_id"], entry["sender_key"],
+            _MAU_SessionID(entry["session_id"]), sess)
+        n += 1
+    return n
+
+
+async def _export_escrow_for_wipe(mxid, old_device_id):
+    """Open the OLD crypto store (keyed on the pre-mint device_id) just long
+    enough to dump its inbound sessions to ESCROW_PATH, then close it.
+    No-op if the store file or the old device_id is absent (nothing to
+    escrow — e.g. the transition case where no device_id was cached and the
+    stale pre-PR-#37 pickle was unreadable anyway)."""
+    if not old_device_id or not CRYPTO_DB.exists():
+        return 0
+    db = _MAU_Database.create(f"sqlite:///{CRYPTO_DB}",
+                               upgrade_table=_MAU_PgCryptoStore.upgrade_table)
+    await db.start()
+    cs = _MAU_PgCryptoStore(account_id=mxid or "approver",
+                             pickle_key=f"{mxid}:{old_device_id}", db=db)
+    await cs.open()
+    try:
+        return await export_inbound_sessions(cs)
+    finally:
+        await db.stop()
 
 
 # --- JSON-file helpers ---
@@ -1497,6 +1602,17 @@ async def sync_loop():
     client.crypto = olm
     client.crypto_store = cs
 
+    # Restore escrowed inbound megolm sessions into the fresh store (issue
+    # #60). On the first boot after this change there is no escrow file and
+    # this is a 0-session no-op. After a re-mint that wiped the store, this
+    # is what keeps pre-wipe history decryptable. A corrupt escrow raises
+    # (no silent skip) — the startup fails loudly so the operator repairs
+    # or removes the file rather than the bot silently losing history.
+    _n = await import_inbound_sessions(cs)
+    if _n:
+        print(f"[startup] restored {_n} escrowed inbound megolm sessions "
+              f"from {ESCROW_PATH}", flush=True)
+
     # Queue admin-command events as they arrive (mautrix decrypts before
     # invoking handlers). Drained once per sync cycle below.
     admin_queue = asyncio.Queue()
@@ -1996,6 +2112,20 @@ async def main():
     # left a stale pickle for an unknown device).
     if sr2_device_changed or (
             sr2_reminted and not sr2_cached_device_before and sr2_crypto_existed_before):
+        # Escrow inbound megolm sessions BEFORE the wipe so historical
+        # messages stay decryptable after re-mint (issue #60). Only the
+        # device-rotated path has a known old pickle key to read from; the
+        # transition case (no cached device_id) cannot be escrowed and those
+        # stale pickles were unreadable anyway. Escrow failure is logged
+        # loudly but does not block the wipe — the bot must still boot.
+        if sr2_cached_device_before:
+            try:
+                _n = await _export_escrow_for_wipe(sr2_mxid, sr2_cached_device_before)
+                print(f"[self-heal] escrowed {_n} inbound megolm sessions to "
+                      f"{ESCROW_PATH} before crypto wipe", flush=True)
+            except Exception as e:
+                print(f"[self-heal] escrow export FAILED (history not saved, "
+                      f"continuing to wipe): {type(e).__name__}: {e}", flush=True)
         _wipe_crypto_store()
 
     # Self-heal @onboarding-bot (lobby flow). Same shape; no crypto wipe
