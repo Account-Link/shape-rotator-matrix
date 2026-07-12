@@ -2116,16 +2116,14 @@ async def main():
         # messages stay decryptable after re-mint (issue #60). Only the
         # device-rotated path has a known old pickle key to read from; the
         # transition case (no cached device_id) cannot be escrowed and those
-        # stale pickles were unreadable anyway. Escrow failure is logged
-        # loudly but does not block the wipe — the bot must still boot.
+        # stale pickles were unreadable anyway. An export failure PROPAGATES
+        # and blocks the wipe — same loud-failure contract as the import side:
+        # we refuse to destroy the store's history on a failure we can't
+        # explain rather than boot looking healthy with history silently lost.
         if sr2_cached_device_before:
-            try:
-                _n = await _export_escrow_for_wipe(sr2_mxid, sr2_cached_device_before)
-                print(f"[self-heal] escrowed {_n} inbound megolm sessions to "
-                      f"{ESCROW_PATH} before crypto wipe", flush=True)
-            except Exception as e:
-                print(f"[self-heal] escrow export FAILED (history not saved, "
-                      f"continuing to wipe): {type(e).__name__}: {e}", flush=True)
+            _n = await _export_escrow_for_wipe(sr2_mxid, sr2_cached_device_before)
+            print(f"[self-heal] escrowed {_n} inbound megolm sessions to "
+                  f"{ESCROW_PATH} before crypto wipe", flush=True)
         _wipe_crypto_store()
 
     # Self-heal @onboarding-bot (lobby flow). Same shape; no crypto wipe

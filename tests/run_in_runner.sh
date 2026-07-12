@@ -87,6 +87,18 @@ DEV_HS="$HS" \
   ADMIN_MXID="$ADMIN_MXID" \
   python3 tests/admin_e2ee.py
 
+# Escrow durability (issue #60): runs the ACTUAL approver export/wipe/import
+# against a re-mint under a NEW device_id and proves the re-minted bot still
+# decrypts a pre-wipe message. Permanent regression gate — a future self-heal
+# edit that silently re-breaks history-key survival fails here.
+echo "[runner] === escrow_durability.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  SPACE_ID="$SPACE_ID" \
+  SPACE_CHILD_IDS="$SPACE_CHILD_IDS" \
+  ADMIN_COMMAND_ROOM="$ADMIN_COMMAND_ROOM" \
+  python3 tests/escrow_durability.py
+
 # Paste A+B+C SAS verification end-to-end. **Informational**: the
 # upstream SAS dance is tracked-flaky against continuwuity (issue #1) so
 # we run the test for visibility but don't gate the PR on its outcome.
