@@ -99,6 +99,11 @@ DEV_HS="$HS" \
   ADMIN_COMMAND_ROOM="$ADMIN_COMMAND_ROOM" \
   python3 tests/escrow_durability.py
 
+echo "[runner] === history_bundle_e2e.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  python3 tests/history_bundle_e2e.py
+
 # Paste A+B+C SAS verification end-to-end. **Informational**: the
 # upstream SAS dance is tracked-flaky against continuwuity (issue #1) so
 # we run the test for visibility but don't gate the PR on its outcome.

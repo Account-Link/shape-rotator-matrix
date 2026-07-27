@@ -62,6 +62,7 @@ from mautrix.types import (
 )
 from mautrix.crypto import OlmMachine as _MAU_OlmMachine
 from mautrix.crypto.sessions import InboundGroupSession as _MAU_InboundGroupSession
+from mautrix.crypto.attachments import encrypt_attachment as _MAU_encrypt_attachment
 from mautrix.crypto.store.asyncpg import PgCryptoStore as _MAU_PgCryptoStore
 from mautrix.util.async_db import Database as _MAU_Database
 
@@ -88,6 +89,11 @@ CRYPTO_DB     = Path(os.environ.get("CRYPTO_DB", "/data/bot_crypto.db"))
 # (issue #60). Plaintext is fine: same /data volume + trust domain as
 # bot_crypto.db itself. The file IS the escrow — replaced on each wipe.
 ESCROW_PATH   = Path(os.environ.get("ESCROW_PATH", "/data/inbound_sessions.escrow.json"))
+
+# Set by sync_loop once the persistent Olm store is open.  The inviter-side
+# MSC4268 builder deliberately uses the same store as the running bot; a
+# second store would not contain the sessions that the bot actually received.
+_ROOM_KEY_BUNDLE_STORE = None
 
 # Persisted bot passwords for self-mint-on-boot. If the env-provided access
 # token is stale (M_UNKNOWN_TOKEN at startup), the bot logs in with the
@@ -1551,6 +1557,89 @@ class _StateStore:
         return list(self._joined)
 
 
+async def build_room_key_bundle(room_id) -> dict:
+    """Export and upload this bot's MSC4268 room-key bundle for ``room_id``.
+
+    Shape Rotator rooms have always used ``history_visibility: shared``.  We
+    therefore include every inbound Megolm session, including sessions whose
+    original ``m.room_key`` predates mautrix's ``shared_history`` support.
+    The returned mapping is the attachment portion ready to put in the
+    ``file`` field of an ``m.room_key_bundle`` to-device message.
+    """
+    if _ROOM_KEY_BUNDLE_STORE is None:
+        raise RuntimeError("MSC4268 crypto store is not initialized")
+
+    rows = await _ROOM_KEY_BUNDLE_STORE.db.fetch(
+        """
+        SELECT session_id, sender_key, signing_key, withheld_code
+        FROM crypto_megolm_inbound_session
+        WHERE room_id=$1 AND account_id=$2
+        ORDER BY session_id
+        """,
+        room_id,
+        _ROOM_KEY_BUNDLE_STORE.account_id,
+    )
+    room_keys, withheld = [], []
+    for row in rows:
+        session_id = str(row["session_id"])
+        sender_key = str(row["sender_key"])
+        if row["withheld_code"] is not None:
+            withheld.append({
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "code": str(row["withheld_code"]),
+                "reason": "The session is withheld by the crypto store",
+                "room_id": str(room_id),
+                "sender_key": sender_key,
+                "session_id": session_id,
+            })
+            continue
+
+        session = await _ROOM_KEY_BUNDLE_STORE.get_group_session(
+            room_id, session_id
+        )
+        if session is None:
+            raise RuntimeError(f"inbound session disappeared: {room_id}/{session_id}")
+        room_keys.append({
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "room_id": str(room_id),
+            "sender_claimed_keys": {"ed25519": str(session.signing_key)},
+            "sender_key": sender_key,
+            "session_id": session_id,
+            "session_key": session.export_session(session.first_known_index),
+        })
+
+    plaintext = json.dumps(
+        {"room_keys": room_keys, "withheld": withheld},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    ciphertext, encrypted_file = _MAU_encrypt_attachment(plaintext)
+    async with aiohttp.ClientSession(
+        headers={"Authorization": f"Bearer {TOKEN}"}
+    ) as http:
+        # The media-repo upload endpoint consumes the encrypted bytes as the
+        # request body.  Multipart would store the MIME envelope itself and
+        # make the EncryptedFile SHA-256 verification fail on download.
+        async with http.post(
+            f"{HS}/_matrix/media/v3/upload?filename=room-key-bundle.json",
+            data=ciphertext,
+            headers={"Content-Type": "application/octet-stream"},
+        ) as response:
+            if response.status not in (200, 201):
+                raise RuntimeError(
+                    f"media upload failed: HTTP {response.status}: "
+                    f"{(await response.text())[:500]}"
+                )
+            uploaded = await response.json()
+
+    content_uri = uploaded.get("content_uri")
+    if not content_uri:
+        raise RuntimeError(f"media upload omitted content_uri: {uploaded}")
+    file_info = encrypted_file.serialize()
+    file_info["url"] = content_uri
+    return {"url": content_uri, "file": file_info}
+
+
 async def sync_loop():
     """Mautrix-based sync loop with full E2EE support.
 
@@ -1594,6 +1683,8 @@ async def sync_loop():
     cs = _MAU_PgCryptoStore(account_id=OUR_MXID or "approver",
                              pickle_key=f"{OUR_MXID}:{device_id}", db=db)
     await cs.open()
+    global _ROOM_KEY_BUNDLE_STORE
+    _ROOM_KEY_BUNDLE_STORE = cs
     ss = _StateStore(state_store)
     olm = _MAU_OlmMachine(client, cs, ss)
     olm.share_keys_min_trust = _MAU_TrustState.UNVERIFIED
