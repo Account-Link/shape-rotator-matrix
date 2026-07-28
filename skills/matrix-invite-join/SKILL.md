@@ -240,6 +240,14 @@ receiving side of `m.key.verification.*`: accept, key-exchange, MAC compute
 side — fine for a public bot; what matters to the Element user is that
 *they* verified the bot, which is what their shield reflects.
 
+The mautrix responder also handles MSC4268 history bundles. When an invite
+arrives, it records the inviter from the invite-state membership event. An
+Olm-encrypted `m.room_key_bundle` is accepted only from that inviter and only
+for that room; the responder downloads and decrypts the attachment, imports its
+Megolm sessions into the persistent crypto store, and logs malformed or
+unauthorized bundles as errors. This is what lets an invitee decrypt messages
+sent before joining. It never accepts a bundle from an arbitrary room member.
+
 Reason we switched SDKs: matrix-nio's `Sas` state machine has a known sync-
 loop coordination gap (see `shape-rotator-matrix` issue #1). Mautrix is what
 Element bridges use and has battle-tested verification.
