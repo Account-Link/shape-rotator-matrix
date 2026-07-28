@@ -1,0 +1,25 @@
+[escrow] bot=@esc_bot_1783803920_6754:localhost:46167 (devs BOT_A_e403 -> BOT_B_4d28) alice=@esc_alice_1783803920_6754:localhost:46167
+[escrow] room=!toJ2t5qrm45GcAbu03uelexOmthA7YNVXqsb0w3W2zI
+Device @esc_alice_1783803920_6754:localhost:46167/ALICE3a97 isn't cross-signed
+Device @esc_bot_1783803920_6754:localhost:46167/BOT_A_e403 isn't cross-signed
+Device @esc_bot_1783803920_6754:localhost:46167/BOT_A_e403 isn't cross-signed
+Didn't find cross-signing key master of @esc_bot_1783803920_6754:localhost:46167
+[escrow] pre-wipe msg id=$hMYFDJRq_BMrysrz4eFqr2DVnHN9D6AcovQA8e2SMk8 body='history-must-survive-03167c4d'
+Device @esc_alice_1783803920_6754:localhost:46167/ALICE3a97 isn't cross-signed
+Device @esc_alice_1783803920_6754:localhost:46167/ALICE3a97 isn't cross-signed
+Didn't find cross-signing key master of @esc_alice_1783803920_6754:localhost:46167
+  [PASS] bot device A decrypts the message (inbound session present)
+  [PASS] export_inbound_sessions dumps the inbound megolm session(s)  (1 session(s) -> inbound_sessions.escrow.json)
+[self-heal] removed /tmp/escrow_1783803920_6754/bot_crypto.db
+  [PASS] _wipe_crypto_store deletes bot_crypto.db  (fresh store on next open)
+  [PASS] without escrow, wiped store cannot decrypt (the bug #60 fixes)  (SessionNotFound after wipe)
+[self-heal] removed /tmp/escrow_1783803920_6754/bot_crypto.db
+  [PASS] re-mint logs the bot in under a NEW device_id  (BOT_A_e403 -> BOT_B_4d28)
+  [PASS] import_inbound_sessions restores the escrowed session(s)  (1/1 restored)
+Device @esc_alice_1783803920_6754:localhost:46167/ALICE3a97 isn't cross-signed
+Device @esc_alice_1783803920_6754:localhost:46167/ALICE3a97 isn't cross-signed
+Didn't find cross-signing key master of @esc_alice_1783803920_6754:localhost:46167
+  [PASS] re-minted bot (new device) decrypts the pre-wipe message  (body='history-must-survive-03167c4d')
+  [PASS] escrow file is retained after import (durable across wipes)
+
+[escrow] 8/8 checks passed
