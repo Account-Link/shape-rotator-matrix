@@ -30,3 +30,18 @@ Scripts here:
   files-in-repo containing values.
 - Validate before mutating (e.g. `/whoami` before pushing the token).
 - Are idempotent — running twice is the same as once.
+
+## Co-admin handoff
+
+Invite each helper's own Matrix account to the Shape Rotator space and set its
+power level to 50 or higher. The helper then uses that MXID in the configured
+admin room; no shared bot token is needed.
+
+The v1 admin room is handled by the mautrix-based approver and may be encrypted.
+The bot decrypts commands and encrypts replies using its persisted crypto store;
+keep that store on the `/data` volume and never reuse its device ID with a fresh
+store. Cleartext rooms use the same command surface.
+
+Supported commands are `!mint`, `!codes`, `!revoke`, `!kick`, `!ban`, `!unban`,
+and `!stats`. Moderation commands target the Shape Rotator space. Audit entries
+remain in `/data/log.jsonl`.

@@ -143,6 +143,16 @@ File format:
 
 All approvals and rejections are appended to `/data/log.jsonl`.
 
+## Admin command room and E2EE decision
+
+Issue #7 uses the mautrix-based approver for the admin command room, so the room
+may be encrypted; the bot decrypts incoming commands and encrypts its replies.
+This is the v1 decision rather than requiring a special cleartext admin room.
+Each human admin uses their own MXID and must have power level 50 or higher.
+Commands are limited to the configured room, while `!kick`, `!ban`, and `!unban`
+apply to the Shape Rotator space. `!stats` reports the last 24 hours from the
+approver audit log and current vetting/lobby state.
+
 ## Secrets that belong in .env
 
 - `NAMECHEAP_USERNAME`, `NAMECHEAP_API_KEY` — DNS-01 for Let's Encrypt
