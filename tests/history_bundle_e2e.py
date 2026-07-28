@@ -104,22 +104,56 @@ async def main():
     assert len(exported["room_keys"]) >= 2
     assert not exported["withheld"]
 
-    # Bob joins after both messages and cannot decrypt until the bundle is imported.
+    # The production invite path sends the bundle to every device before the
+    # invitee joins. This is the chip-4 assertion, not just a direct builder
+    # call.
     bob_mxid, bob_token = register(f"bundle_bob_{suffix}", secrets.token_urlsafe(24),
                                    f"BBOB{secrets.token_hex(2)}")
-    status, body = _post(
-        f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/invite",
-        {"user_id": bob_mxid}, token=senders[0][1])
+    os.environ.update(HS=HS, SPACE_ID=room_id, MATRIX_TOKEN=bot_token)
+    sys.path.insert(0, str(REPO / "knock-approver"))
+    import approver
+    approver._ROOM_KEY_BUNDLE_STORE = clients[2][1]
+    approver._ROOM_KEY_BUNDLE_CLIENT = clients[2][0]
+    approver._ROOM_KEY_BUNDLE_OLM = clients[2][0].crypto
+    approver.ENDORSEMENTS_PATH = Path(f"/tmp/bundle_endorsements_{suffix}.jsonl")
+    bob_device = get_json("/_matrix/client/v3/account/whoami", bob_token)["device_id"]
+    bob, bob_store, bob_state, bob_db = await make_client(
+        bob_mxid, bob_token, bob_device, f"/tmp/bundle_{suffix}_bob.db")
+    received = []
+    bundle_type = EventType.find("m.room_key_bundle", EventType.Class.TO_DEVICE)
+    async def on_bundle(evt):
+        received.append(evt)
+    bob.add_event_handler(bundle_type, on_bundle)
+    await bob.crypto.share_keys()
+    await sync_once(bob, bob_state, first=True)
+
+    # The invite path sends to the device keys that are already published.
+    status, body = await approver._admin_invite(
+        bob_mxid, room_id, code_or_manual="bundle-e2e-code")
     assert status == 200, (status, body)
+    await sync_once(bob, bob_state)
+
+    # Bob receives and Olm-decrypts the custom to-device event from the same
+    # bot identity that issued the room invite.
+    assert received, "invitee did not receive an Olm-decrypted m.room_key_bundle"
+    received_content = received[0].content
+    if hasattr(received_content, "serialize"):
+        received_content = received_content.serialize()
+    assert received_content["room_id"] == room_id
+    assert received_content["file"]["url"].startswith("mxc://")
+    edge = json.loads(Path(approver.ENDORSEMENTS_PATH).read_text())
+    assert edge["invitee"] == bob_mxid
+    assert edge["code_or_manual"] == "bundle-e2e-code"
+    assert edge["room_id"] == room_id
+    assert edge["endorser"] == bot_mxid
+
+    # Bob joins after both messages, imports the delivered bundle, and
+    # decrypts the pre-join messages from both senders.
     status, body = _post(
         f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/join",
         {}, token=bob_token)
     assert status == 200, (status, body)
-    bob_device = get_json("/_matrix/client/v3/account/whoami", bob_token)["device_id"]
-    bob, bob_store, bob_state, bob_db = await make_client(
-        bob_mxid, bob_token, bob_device, f"/tmp/bundle_{suffix}_bob.db")
-    await bob.crypto.share_keys()
-    await sync_once(bob, bob_state, first=True)
+    await sync_once(bob, bob_state)
     raw_events = {str(event["event_id"]): event for event in messages(room_id, bob_token)}
     for event_id, _body in events:
         try:

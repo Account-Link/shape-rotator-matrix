@@ -77,6 +77,7 @@ REG_TOKEN     = os.environ.get("CONDUWUIT_REGISTRATION_TOKEN", "")
 CODES_PATH    = Path(os.environ.get("CODES_PATH",        "/data/codes.json"))
 SIGNUP_PATH   = Path(os.environ.get("SIGNUP_CODES_PATH", "/data/signup_codes.json"))
 LOG_PATH      = Path(os.environ.get("LOG_PATH",          "/data/log.jsonl"))
+ENDORSEMENTS_PATH = Path(os.environ.get("ENDORSEMENTS_PATH", "/data/endorsements.jsonl"))
 SYNC_STATE    = Path(os.environ.get("SYNC_STATE",        "/data/sync_since.txt"))
 HTTP_PORT     = int(os.environ.get("HTTP_PORT", "8001"))
 # Bot's E2EE crypto store (megolm sessions, identity keys, peer device keys).
@@ -87,6 +88,8 @@ CRYPTO_DB     = Path(os.environ.get("CRYPTO_DB", "/data/bot_crypto.db"))
 # MSC4268 builder deliberately uses the same store as the running bot; a
 # second store would not contain the sessions that the bot actually received.
 _ROOM_KEY_BUNDLE_STORE = None
+_ROOM_KEY_BUNDLE_CLIENT = None
+_ROOM_KEY_BUNDLE_OLM = None
 
 # Persisted bot passwords for self-mint-on-boot. If the env-provided access
 # token is stale (M_UNKNOWN_TOKEN at startup), the bot logs in with the
@@ -294,6 +297,18 @@ def audit(event):
     with LOG_PATH.open("a") as f:
         f.write(json.dumps(event) + "\n")
 
+
+def endorsement(invitee, code_or_manual, room_id, endorser=None):
+    """Append the web-of-trust edge created by a successful invitation."""
+    with ENDORSEMENTS_PATH.open("a") as f:
+        f.write(json.dumps({
+            "endorser": endorser or OUR_MXID or "bot",
+            "invitee": invitee,
+            "code_or_manual": code_or_manual,
+            "room_id": room_id,
+            "ts": time.time(),
+        }, separators=(",", ":")) + "\n")
+
 def merge_seed(path, env_key):
     """Merge JSON from env var into the codes file; only adds missing keys."""
     seed = os.environ.get(env_key, "").strip()
@@ -439,7 +454,7 @@ async def _lobby_invite_to_space(mxid):
             return r.status, (await r.text())[:300]
 
 
-async def _invite_to_children(mxid):
+async def _invite_to_children(mxid, code_or_manual="manual"):
     """Invite mxid to each SPACE_CHILD_IDS room using the main bot (TOKEN),
     which has admin PL across the children. Lobby users are typically
     remote (matrix.org), so we can't join on their behalf the way the
@@ -450,7 +465,10 @@ async def _invite_to_children(mxid):
     overall promotion."""
     invited = []
     for child in SPACE_CHILD_IDS:
-        st, body = await _admin_invite(mxid, child, reason="vetted via lobby airlock")
+        st, body = await _admin_invite(
+            mxid, child, reason="vetted via lobby airlock",
+            code_or_manual=code_or_manual,
+        )
         if st in (200, 403):
             invited.append(child)
         else:
@@ -527,11 +545,15 @@ def _vet(displayname, message, keyword):
     return True, "ok"
 
 
-async def _promote(client, mxid):
+async def _promote(client, mxid, code_or_manual="manual"):
     try:
         await client.api.request("POST",
             f"/_matrix/client/v3/rooms/{SPACE_ID}/invite",
             content={"user_id": mxid, "reason": "vetted via airlock"})
+        try:
+            await send_room_key_bundle(mxid, SPACE_ID, code_or_manual)
+        finally:
+            endorsement(mxid, code_or_manual, SPACE_ID)
         return 200, ""
     except Exception as e:
         return getattr(e, "http_status", 500), str(e)[:300]
@@ -648,7 +670,9 @@ async def process_vetting_room(client, room_id, meta, join_ev, msgs):
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["displayname"] = displayname
-                invited_children = await _invite_to_children(meta["mxid"])
+                invited_children = await _invite_to_children(
+                    meta["mxid"], meta["code"]
+                )
                 meta["invited_children"] = invited_children
                 signup_code, signup_url = _mint_welcome_signup_code(meta["mxid"])
                 ack = "nice — invited you to shape rotator. you can leave this room."
@@ -1535,6 +1559,52 @@ async def build_room_key_bundle(room_id) -> dict:
     return {"url": content_uri, "file": file_info}
 
 
+async def send_room_key_bundle(invitee, room_id, code_or_manual="manual") -> bool:
+    """Send the inviter's history bundle to every device of an invitee.
+
+    The bundle is sent only for rooms whose history is visible to newcomers.
+    The same persistent OlmMachine that received the room's sessions encrypts
+    the to-device event, so the sender identity is also the Matrix inviter.
+    """
+    if _ROOM_KEY_BUNDLE_STORE is None or _ROOM_KEY_BUNDLE_OLM is None:
+        raise RuntimeError("MSC4268 crypto machine is not initialized")
+
+    history = await _ROOM_KEY_BUNDLE_CLIENT.api.request(
+        "GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
+        "/state/m.room.history_visibility"
+    )
+    visibility = (history or {}).get("history_visibility", "shared")
+    if visibility not in {"shared", "world_readable"}:
+        return False
+    try:
+        await _ROOM_KEY_BUNDLE_CLIENT.api.request(
+            "GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
+            "/state/m.room.encryption"
+        )
+    except Exception:
+        return False
+
+    devices = await _ROOM_KEY_BUNDLE_OLM._fetch_keys(
+        [_MAU_UserID(invitee)], include_untracked=True
+    )
+    invitee_devices = devices.get(_MAU_UserID(invitee), {})
+    if not invitee_devices:
+        print(f"[MSC4268] no device keys yet for {invitee}; bundle deferred",
+              flush=True)
+        return False
+
+    bundle = await build_room_key_bundle(room_id)
+    event_type = _MAU_EventType.find(
+        "m.room_key_bundle", _MAU_EventType.Class.TO_DEVICE
+    )
+    content = {"room_id": room_id, "file": bundle["file"]}
+    for device in invitee_devices.values():
+        await _ROOM_KEY_BUNDLE_OLM.send_encrypted_to_device(
+            device, event_type, content
+        )
+    return True
+
+
 async def sync_loop():
     """Mautrix-based sync loop with full E2EE support.
 
@@ -1579,6 +1649,7 @@ async def sync_loop():
                              pickle_key=f"{OUR_MXID}:{device_id}", db=db)
     await cs.open()
     global _ROOM_KEY_BUNDLE_STORE
+    global _ROOM_KEY_BUNDLE_CLIENT, _ROOM_KEY_BUNDLE_OLM
     _ROOM_KEY_BUNDLE_STORE = cs
     ss = _StateStore(state_store)
     olm = _MAU_OlmMachine(client, cs, ss)
@@ -1586,6 +1657,8 @@ async def sync_loop():
     olm.send_keys_min_trust = _MAU_TrustState.UNVERIFIED
     await olm.load()
     client.crypto = olm
+    _ROOM_KEY_BUNDLE_CLIENT = client
+    _ROOM_KEY_BUNDLE_OLM = olm
     client.crypto_store = cs
 
     # Queue admin-command events as they arrive (mautrix decrypts before
@@ -1692,14 +1765,21 @@ def valid_username(u: str) -> bool:
     return (u.isascii() and 1 <= len(u) <= 32
             and all(c.isalnum() or c in "-_.=" for c in u))
 
-async def _admin_invite(mxid, room_id, reason="signup auto-invite"):
+async def _admin_invite(mxid, room_id, reason="signup auto-invite",
+                        code_or_manual="manual"):
     """Invite `mxid` to `room_id` using the admin (MATRIX_TOKEN) account."""
     async with aiohttp.ClientSession(
         headers={**AUTH, "Content-Type": "application/json"}
     ) as s:
         url = f"{HS}/_matrix/client/v3/rooms/{room_id}/invite"
         async with s.post(url, json={"user_id": mxid, "reason": reason}) as r:
-            return r.status, await r.text()
+            body = await r.text()
+            if r.status == 200:
+                try:
+                    await send_room_key_bundle(mxid, room_id, code_or_manual)
+                finally:
+                    endorsement(mxid, code_or_manual, room_id)
+            return r.status, body
 
 async def _as_user(access_token, method, path, body=None):
     """Make a request as the freshly-registered user."""
@@ -1773,7 +1853,7 @@ async def signup_handler(request):
     steps_done = {"register": True}
 
     # --- Step 3: admin invites the new user to the space ---
-    st, _body = await _admin_invite(mxid, SPACE_ID)
+    st, _body = await _admin_invite(mxid, SPACE_ID, code_or_manual=code)
     steps_done["space_invited"] = (st == 200)
     if st != 200:
         print(f"[signup] admin invite of {mxid} -> {st}: {_body[:200]}", flush=True)
