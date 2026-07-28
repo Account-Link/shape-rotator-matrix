@@ -1,0 +1,43 @@
+# phala CLI surface used by the workflow (v1.1.19, confirmed against --help)
+
+## deploy — CREATE (no --cvm-id)
+    --api-token TOKEN, --api-key TOKEN  API token for authenticating with Phala Cloud
+    --cvm-id <value>        CVM identifier (UUID, app_id, instance_id, or name)
+    -n, --name <value>      CVM name (defaults to directory name)
+    -c, --compose <value>   Path to Docker Compose file (default: docker-compose.yml)
+    -e, --env <value>       Environment variable (KEY=VALUE) or env file path (repeatable)
+    --wait                  Wait for deployment/update completion
+    --commit                Commit a previously prepared update using a commit token. Requires --token; --compose-hash and --transaction-hash are read from the token when omitted.
+    --compose-hash <value>  Compose hash from a prepare-only update. Optional in --commit mode when the token can provide it.
+    --uuid <value>          [DEPRECATED] Use --cvm-id instead. CVM UUID.
+    phala deploy --cvm-id app_abc123
+    phala deploy --cvm-id my-app --compose ./new-docker-compose.yml -e .env
+    phala deploy --cvm-id app_abc123 --wait
+    phala deploy --cvm-id app_123 --no-public-logs
+    phala deploy --cvm-id app_123 --prepare-only -c docker-compose.yml
+    phala deploy --cvm-id app_123 --commit --token <token> --compose-hash 0x... --transaction-hash 0x...
+
+## cvms list — JSON status poll (real schema below)
+    --api-token TOKEN, --api-key TOKEN  API token for authenticating with Phala Cloud
+    -j, --json, --no-json   Output in JSON format
+    --search <value>        Search by name, app_id, vm_uuid, or instance_id
+    --status <value>        Filter by CVM status (can be specified multiple times)
+    phala cvms ls --search my-cvm
+    phala cvms ls --status running
+    phala cvms ls --json
+
+## cvms delete — non-interactive teardown
+  Usage: phala cvms delete [options] [<cvm_id>]
+    <cvm_id>?         CVM identifier (UUID, app_id, instance_id, or name)
+    --api-token TOKEN, --api-key TOKEN  API token for authenticating with Phala Cloud
+    -f, --force             Skip confirmation prompt
+    -y, --yes               Alias for --force (skip confirmation prompt)
+    phala cvms delete app_123 --force
+    phala cvms delete my-app --yes
+
+## REAL phala cvms list -j schema (FREE read, no CVM created; identifying values redacted)
+  top-level keys: ['success', 'page', 'pageSize', 'total', 'totalPages', 'items']
+  total CVMs on account: 49
+  item keys: ['appId', 'cvmName', 'status', 'uptime']
+  sample item (redacted): {"appId": "<appId>", "cvmName": "feedling-redis-pre", "status": "running", "uptime": "2days 22h 20m 41s"}
+  -> workflow polls items[].status where cvmName == CVM_NAME  [matches reality]

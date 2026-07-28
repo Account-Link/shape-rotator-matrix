@@ -1,0 +1,247 @@
+name: ephemeral staging validation
+
+# Issue #14 — spin up a throwaway Phala CVM per validation run, run the
+# deployed smoke against it, tear it down ALWAYS. Catches Phala backend /
+# compose / fresh-RocksDB bootstrap issues on the PR instead of on prod.
+#
+# Cost & first-run note (READ BEFORE MAKING THIS A REQUIRED CHECK):
+#   * One short-lived CVM per run (~5-10 min). path-filtered below so only
+#     deploy-relevant changes trigger it (bounds spend regardless of whether
+#     Phala bills per-second or per-hour minimum — see issue #14 acceptance #1).
+#   * A newly-added workflow does NOT run for other PRs until it is merged
+#     to the base branch. So the FIRST live proof is a manual run:
+#         Actions tab -> "ephemeral staging validation" -> Run workflow
+#     Watch that run end-to-end (CVM created -> running -> smoke -> torn down)
+#     before enabling this as a required branch-protection check.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'docker-compose.yml'
+      - 'docker-compose.staging.yml'
+      - '.github/workflows/staging-validate.yml'
+      - '.github/workflows/deploy.yml'
+      - 'deploy/**'
+      - 'landing/**'
+      - 'knock-approver/**'
+      - 'tests/smoke.py'
+      - 'tests/staging_bootstrap.py'
+
+# NEVER cancel an in-flight validation. A cancelled run can race the `if: always`
+# teardown and strand a paid CVM — the exact failure mode this workflow exists
+# to make impossible. Runs are already serialized per PR by the path filter +
+# unique CVM name (per run_id).
+concurrency:
+  group: staging-cvm-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_API_KEY }}
+      CVM_NAME: staging-pr-${{ github.run_id }}
+      # .invalid is RFC-2606-reserved; becomes the ephemeral server_name.
+      MATRIX_SERVER_NAME: staging-pr-${{ github.run_id }}.invalid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: install phala CLI
+        run: npm install -g phala
+
+      - name: sweep orphaned staging CVMs from a crashed prior run
+        # `staging-pr-*` is this workflow's private namespace. If a previous run
+        # died before teardown (runner killed, OOM, etc.) its CVM would otherwise
+        # accrue cost forever. This step deletes any such orphan BEFORE we create
+        # a new one. `cvms delete -f` is non-interactive (CI-safe).
+        run: |
+          set +e
+          orphans=$(phala cvms list --search staging-pr- -j \
+            | python3 -c 'import json,sys
+          d=json.load(sys.stdin)
+          [print(i["cvmName"]) for i in d.get("items",[]) if i.get("cvmName","").startswith("staging-pr-")]')
+          [ -z "$orphans" ] && { echo "no orphaned staging CVMs"; exit 0; }
+          echo "$orphans" | while read -r o; do
+            [ -n "$o" ] || continue
+            [ "$o" = "$CVM_NAME" ] && continue
+            echo "::warning::deleting orphaned staging CVM: $o"
+            phala cvms delete "$o" -f || true
+          done
+
+      - name: build staging env (throwaway secrets + one-shot codes)
+        run: |
+          set -euo pipefail
+          reg=$(openssl rand -hex 24)
+          knock=$(openssl rand -hex 12)
+          signup=$(openssl rand -hex 12)
+          admin_pw=$(openssl rand -hex 16)
+          umask 077
+          cat > .staging.env <<EOF
+          REGISTRATION_TOKEN=$reg
+          BOOTSTRAP_PASSWORD=$admin_pw
+          KNOCK_CODE=$knock
+          SIGNUP_CODE=$signup
+          INITIAL_CODES={"$knock":{"uses_remaining":2}}
+          INITIAL_SIGNUP_CODES={"$signup":{"uses_remaining":2}}
+          KNOCK_APPROVER_TOKEN=invalid-until-phase2
+          ONBOARDING_BOT_TOKEN=
+          SHAPEROTATOR_SPACE_ID=!bootstrap:placeholder
+          SPACE_CHILD_IDS=
+          ONBOARDING_INVITER_MXID=
+          ADMIN_ALLOWLIST=
+          ADMIN_COMMAND_ROOM=
+          DSTACK_AUTHORIZED_KEYS=
+          NAMECHEAP_USERNAME=
+          NAMECHEAP_API_KEY=
+          HOMESERVER=
+          EOF
+          # encode_env.sh reads .env, fills the *_B64 assets from landing/ +
+          # knock-approver/, and writes them back. We point it at our staging env.
+          cp .staging.env .env
+          ./deploy/encode_env.sh >/dev/null
+          # Fold the freshly base64-encoded assets into the staging env file
+          # (phala deploy -e reads a single env file).
+          grep -E '^(INDEX|JOIN|SIGNUP|NGINX_CONF|RESPONDER|SAS_VERIFICATION|APPROVER)_B64=' .env \
+            >> .staging.env
+          # Surface the throwaway codes for the smoke step.
+          {
+            echo "REGISTRATION_TOKEN=$reg"
+            echo "KNOCK_CODE=$knock"
+            echo "SIGNUP_CODE=$signup"
+          } >> "$GITHUB_ENV"
+
+      - name: phase 1 — create ephemeral CVM, poll until running
+        # `phala deploy --name` (no --cvm-id) provisions a FRESH CVM. We do NOT
+        # use --wait: in the #13 prod incident `--wait` exited nonzero while the
+        # CVM was still `starting`, which is the exact slow-Phala case this
+        # staging gate exists to catch. Instead we poll the JSON status ourselves
+        # (matches the real `phala cvms list -j` schema: items[].status) and fail
+        # loud if it doesn't reach `running` in 10 min.
+        run: |
+          set -uo pipefail
+          phala deploy --api-token "$PHALA_CLOUD_API_KEY" \
+            --name "$CVM_NAME" -c docker-compose.staging.yml -e .staging.env \
+            > deploy1.log 2>&1 || true
+          cat deploy1.log
+          status=
+          for i in $(seq 1 60); do   # 60 * 10s = 10 min ceiling
+            status=$(phala cvms list --search "$CVM_NAME" -j --api-token "$PHALA_CLOUD_API_KEY" \
+              | python3 -c 'import json,sys
+          d=json.load(sys.stdin)
+          its=[x for x in d.get("items",[]) if x.get("cvmName")==sys.argv[1]]
+          print(its[0].get("status","?") if its else "absent")' "$CVM_NAME" 2>/dev/null || echo "err")
+            echo "[phase1 $i/60] cvm status: $status"
+            [ "$status" = "running" ] && break
+            sleep 10
+          done
+          if [ "$status" != "running" ]; then
+            echo "::error::CVM did not reach running (last=$status) — Phala backend / image-fetch / attestation / compose failure caught at PR time"
+            exit 1
+          fi
+
+      - name: resolve staging endpoint URL
+        id: url
+        # Phala assigns `<appId>-<port>.<cluster-domain>` per published port.
+        # The staging compose publishes landing on 80, so we want the -80 URL.
+        # We read the cluster domain out of any dstack-pha endpoint Phala reports
+        # on the CVM record (robust to which region the CVM landed in), then build
+        # an explicit http:// URL so smoke.py's stdlib urllib doesn't have to do
+        # TLS verification against a phala-issued cert.
+        run: |
+          set -uo pipefail
+          app_id=$(phala cvms list --search "$CVM_NAME" -j --api-token "$PHALA_CLOUD_API_KEY" \
+            | python3 -c 'import json,sys
+          d=json.load(sys.stdin)
+          its=[x for x in d.get("items",[]) if x.get("cvmName")==sys.argv[1]]
+          print(its[0].get("appId","") if its else "")' "$CVM_NAME")
+          cluster=$(phala cvms get --api-token "$PHALA_CLOUD_API_KEY" "$CVM_NAME" -j 2>/dev/null \
+            | python3 -c 'import json,sys,re
+          d=json.load(sys.stdin)
+          vals=[]
+          def walk(v):
+              if isinstance(v,dict):
+                  for x in v.values(): walk(x)
+              elif isinstance(v,list):
+                  for x in v: walk(x)
+              elif isinstance(v,str): vals.append(v)
+          walk(d)
+          for v in vals:
+              m=re.search(r"-\d+\.(dstack-pha[\w.-]+)", v)
+              if m:
+                  print(m.group(1)); break' || true)
+          cluster=${cluster:-dstack-pha-prod9.phala.network}
+          [ -n "$cluster" ] || [ "$cluster" = "dstack-pha-prod9.phala.network" ] || cluster=dstack-pha-prod9.phala.network
+          if [ -z "$app_id" ]; then
+            echo "::error::could not resolve appId for $CVM_NAME"
+            exit 1
+          fi
+          if [ "$cluster" = "dstack-pha-prod9.phala.network" ]; then
+            echo "::warning::cluster domain fell back to default prod9 — confirm the real region from the Phala dashboard on first run"
+          fi
+          endpoint="http://${app_id}-80.${cluster}"
+          echo "endpoint=$endpoint" | tee -a "$GITHUB_OUTPUT"
+          # Also persist into the env file so the phase-2 redeploy propagates
+          # HS_PUBLIC to knock-approver.
+          sed -i "/^HOMESERVER=/d" .staging.env
+          echo "HOMESERVER=$endpoint" >> .staging.env
+
+      - name: phase 2 — bootstrap fixtures, redeploy, run smoke
+        env:
+          HOMESERVER: ${{ steps.url.outputs.endpoint }}
+        run: |
+          set -uo pipefail
+          # Register an admin, create the space + 3 child rooms smoke.py expects,
+          # and write the admin token / ids back into .staging.env.
+          HOMESERVER="$HOMESERVER" python3 tests/staging_bootstrap.py .staging.env
+
+          # Redeploy the SAME CVM (--cvm-id) with the bootstrapped env so
+          # knock-approver comes up under the admin identity + seeded codes.
+          phala deploy --api-token "$PHALA_CLOUD_API_KEY" --cvm-id "$CVM_NAME" \
+            -c docker-compose.staging.yml -e .staging.env --wait > deploy2.log 2>&1 || true
+          cat deploy2.log
+
+          # Wait for the homeserver client API to answer on the staging URL.
+          for i in $(seq 1 30); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+              "$HOMESERVER/_matrix/client/versions" 2>/dev/null || true)
+            echo "[ready $i/30] /versions=$code"
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          [ "$code" = "200" ] || { echo "::error::homeserver API not answering on $HOMESERVER"; exit 1; }
+
+          # The deployed smoke test, driven against the ephemeral staging URL,
+          # pointed at the freshly-bootstrapped space + throwaway codes/admin.
+          source .staging.env
+          ADMIN_TOKEN="$KNOCK_APPROVER_TOKEN" \
+          SIGNUP_CODE="$SIGNUP_CODE" \
+          KNOCK_CODE="$KNOCK_CODE" \
+          REG_TOKEN="$REGISTRATION_TOKEN" \
+          SPACE_ID="$SHAPEROTATOR_SPACE_ID" \
+          SPACE_CHILDREN="$SPACE_CHILD_IDS" \
+          HOMESERVER="$HOMESERVER" \
+            python3 tests/smoke.py
+
+      - name: always tear down the ephemeral CVM (+ orphan sweep)
+        # The non-negotiable guarantee (issue #14 core requirement): the CVM is
+        # destroyed on EVERY outcome — success, smoke failure, phase-1 failure,
+        # even a cancelled run (`if: always`). Then a belt-and-suspenders sweep
+        # nukes any staging-pr-* CVM that somehow survived.
+        if: always()
+        run: |
+          set +e
+          echo "::notice::tearing down $CVM_NAME"
+          phala cvms delete "$CVM_NAME" -f --api-token "$PHALA_CLOUD_API_KEY" || true
+          leftover=$(phala cvms list --search staging-pr- -j --api-token "$PHALA_CLOUD_API_KEY" \
+            | python3 -c 'import json,sys
+          d=json.load(sys.stdin)
+          [print(i["cvmName"]) for i in d.get("items",[]) if i.get("cvmName","").startswith("staging-pr-")]')
+          echo "$leftover" | while read -r o; do
+            [ -n "$o" ] || continue
+            echo "::warning::post-teardown cleanup: deleting lingering staging CVM $o"
+            phala cvms delete "$o" -f --api-token "$PHALA_CLOUD_API_KEY" || true
+          done
