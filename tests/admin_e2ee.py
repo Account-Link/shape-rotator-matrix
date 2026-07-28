@@ -1,20 +1,18 @@
 """End-to-end test of admin commands in an encrypted room.
 
-Covers the mautrix migration: the bot decrypts incoming `!mint` (and
-friends) sent in an E2EE room and replies with an encrypted message
-that the test client can decrypt back. If the migration regresses, this
-test fails — the haiku captcha isn't enough to cover this path.
+Covers the mautrix migration and the fail-closed admin gate: the bot
+decrypts incoming `!mint` sent in an E2EE room, identifies the sender as
+uncross-signed, and replies with an encrypted refusal. A separate signed-in
+operator flow is required to prove the positive path.
 
 What it asserts:
-  1. A mautrix client signed in as the admin user (allowlisted) joins
+  1. A mautrix client signed in as an unverified admin user joins
      the encrypted ADMIN_COMMAND_ROOM.
   2. Sends `!mint --uses 3 admin-e2ee-test` via send_message_event
      (auto-encrypted because the room has m.room.encryption).
-  3. Within ~30s, sees a reply event from @admin (the bot in this
-     test stack) whose decrypted body contains a `/join?code=…` URL.
-  4. The minted code shows up in `/data/codes.json` on the bot side
-     (validated indirectly via /signup-or-knock or /codes — for v1
-     we just trust the URL).
+  3. Within ~30s, sees an encrypted refusal from @admin (the bot in this
+     test stack) explaining that cross-signing verification is required.
+  4. No mint URL is returned.
 
 Env (set by run_in_runner.sh):
   DEV_HS, DEV_REG_TOKEN, ADMIN_COMMAND_ROOM, ADMIN_MXID
@@ -61,9 +59,9 @@ async def main():
     user_mxid, user_token = register(username, secrets.token_urlsafe(32), device)
     print(f"[admin_e2ee] test user: {user_mxid} device={device}", flush=True)
 
-    # Bump PL of the test user in ADMIN_ROOM so they pass the bot's
-    # _is_admin gate. The bootstrap admin (= bot here) has PL 100 and
-    # can write power_levels.
+    # Bump PL of the test user in ADMIN_ROOM. The user is intentionally not
+    # cross-signed, so the cryptographic gate must refuse before this PL is
+    # considered.
     import urllib.request, urllib.parse
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     if not admin_token:
@@ -131,8 +129,7 @@ async def main():
         TextMessageEventContent(msgtype=MessageType.TEXT, body=cmd))
     log("sent encrypted !mint command", bool(sent_id), f"event_id={sent_id}")
 
-    # Poll for the bot's reply: decrypted body should contain the label
-    # we passed AND a /join?code= URL. Generous deadline (120s) — on slow
+    # Poll for the bot's refusal. Generous deadline (120s) — on slow
     # CI runners the bot may be mid-sync of the previous test's traffic
     # when our !mint lands.
     deadline = time.time() + 120
@@ -150,23 +147,18 @@ async def main():
             return
         if evt.sender == user_mxid:
             return  # our own !mint command echoing back
-        if "/join?code=" in body and label in body:
+        if "cross-signing-verified device" in body:
             seen_reply = body
             received.set()
 
     client.add_event_handler(EventType.ROOM_MESSAGE, on_msg)
     while time.time() < deadline and not received.is_set():
         await sync_once(client, ss, timeout=2000)
-    log("bot replied with encrypted !mint result",
+    log("bot refused unverified encrypted !mint",
         seen_reply is not None,
         f"body[:120]={(seen_reply or '')[:120]!r} ; all_seen={all_seen!r}")
-    if seen_reply:
-        # Pull the URL out and confirm shape
-        import re
-        m = re.search(r"https?://\S+/join\?code=(\S+)", seen_reply)
-        log("reply contains a /join URL with code",
-            bool(m),
-            f"code={m.group(1) if m else None!r}")
+    log("unverified command did not mint a code",
+        not any("/join?code=" in body and label in body for _, body in all_seen))
 
     await db.stop()
 

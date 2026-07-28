@@ -40,8 +40,16 @@ admin room; no shared bot token is needed.
 The v1 admin room is handled by the mautrix-based approver and may be encrypted.
 The bot decrypts commands and encrypts replies using its persisted crypto store;
 keep that store on the `/data` volume and never reuse its device ID with a fresh
-store. Cleartext rooms use the same command surface.
+store.
 
-Supported commands are `!mint`, `!codes`, `!revoke`, `!kick`, `!ban`, `!unban`,
-and `!stats`. Moderation commands target the Shape Rotator space. Audit entries
-remain in `/data/log.jsonl`.
+Supported commands are `!mint`, `!codes`, `!revoke`, `!retention-room`,
+`!kick`, `!ban`, `!unban`, `!stats`, and `!help`. Moderation commands
+target the Shape Rotator space. Audit entries remain in `/data/log.jsonl`.
+
+## Admin command security
+
+The approver only executes admin commands from the encrypted admin room when
+mautrix reports the sender device as `CROSS_SIGNED_TOFU` or stronger. Room
+power level and `ADMIN_ALLOWLIST` are checked after that cryptographic gate.
+Cleartext commands, unknown devices, and rotated master keys are refused; see
+[`docs/SECURITY.md`](../../docs/SECURITY.md).
