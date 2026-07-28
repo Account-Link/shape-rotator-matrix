@@ -30,3 +30,12 @@ in the PR. Tier 1: test transcript is the evidence.
 - imported sessions carry forwarding chain / lower trust — expected.
 - keep the escrow file after import (it IS the durable escrow; replaced next wipe).
 - import MUST raise, never silently skip (no fallbacks).
+
+---
+
+# PLAN — issue #63: invitee-side room key bundle handling
+
+- [x] Remember the inviter for each room from its invite-state membership event.
+- [x] Accept a `m.room_key_bundle` only from that inviter and for that room.
+- [x] Download/decrypt the attachment and import its Megolm sessions.
+- [x] Prove valid delivery/import, pre-join decryption, and outsider rejection in E2E tests.

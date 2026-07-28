@@ -118,4 +118,9 @@ else
   echo "[runner] sas_e2e: FAIL (informational — see issue #1)"
 fi
 
+echo "[runner] === history_bundle_responder_e2e.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  python3 tests/history_bundle_responder_e2e.py
+
 echo "[runner] all gating tests passed"
