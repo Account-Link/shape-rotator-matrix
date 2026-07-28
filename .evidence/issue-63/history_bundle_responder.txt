@@ -1,0 +1,16 @@
+[runner] === history_bundle_responder_e2e.py ===
+Device @bundle_alice_aa6a0e62:localhost:46167/ALaa6a0e62 isn't cross-signed
+Device @bundle_bot_aa6a0e62:localhost:46167/BOaa6a0e62 isn't cross-signed
+Device @bundle_bot_aa6a0e62:localhost:46167/BOaa6a0e62 isn't cross-signed
+Didn't find cross-signing key master of @bundle_bot_aa6a0e62:localhost:46167
+Device @bundle_alice_aa6a0e62:localhost:46167/ALaa6a0e62 isn't cross-signed
+joined invite !SDosTDoELrt0gyppvlayBIZ2hdMav3kEKpmtA2tiPo4
+Device @bundle_alice_aa6a0e62:localhost:46167/ALaa6a0e62 isn't cross-signed
+Didn't find cross-signing key master of @bundle_alice_aa6a0e62:localhost:46167
+Device @bundle_bob_aa6a0e62:localhost:46167/BBaa6a0e62 isn't cross-signed
+rejected m.room_key_bundle from non-inviter sender=@outsider:localhost room=!SDosTDoELrt0gyppvlayBIZ2hdMav3kEKpmtA2tiPo4 inviter=@bundle_bot_aa6a0e62:localhost:46167
+Device @bundle_alice_aa6a0e62:localhost:46167/ALaa6a0e62 isn't cross-signed
+Device @bundle_alice_aa6a0e62:localhost:46167/ALaa6a0e62 isn't cross-signed
+Didn't find cross-signing key master of @bundle_alice_aa6a0e62:localhost:46167
+MSC4268 responder E2E: inviter bundle imported; outsider rejected; pre-join message decrypted
+[runner] all gating tests passed
