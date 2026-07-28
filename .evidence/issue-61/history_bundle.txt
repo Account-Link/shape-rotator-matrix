@@ -1,0 +1,63 @@
+MSC4268 room-key bundle round-trip — dev stack (issue #61 acceptance)
+=====================================================================
+
+Test:   tests/history_bundle_e2e.py  (run via tests/run_in_runner.sh against the
+        continuwuity dev stack, as issue #61's ## Acceptance requires)
+Branch: ready-61, rebased onto staging 9337b7c (PR #64).
+
+Real test stdout — the test prints exactly this single line on success, and
+every step below it is gated by an `assert`, so reaching the print means all
+assertions passed:
+
+    MSC4268 bundle round-trip: 2 sessions exported, uploaded, downloaded, imported, decrypted
+
+What that line proves (each is an explicit assert in history_bundle_e2e.py):
+  - 2 senders (alice, carol) each sent an encrypted pre-join message
+  - the bot holds >=2 inbound Megolm sessions for the room (its own + each sender's)
+  - approver.build_room_key_bundle(room_id) exported every session at
+    first_known_index and uploaded the AES256-CTR EncryptedFile bundle to the
+    REAL media repo (POST /_matrix/media/v3/upload)
+  - a fresh client (bob) downloaded GET /_matrix/media/v3/download/... and
+    attachments.decrypt_attachment verified the SHA-256 hash (the raw-body
+    upload that avoids the multipart/MIME envelope bug)
+  - bob could NOT decrypt the pre-join events before importing the bundle
+    (raises SessionNotFound -> proves the test is not trivially passing)
+  - after importing the 2 exported room_keys, bob decrypted BOTH senders'
+    pre-join messages and their bodies matched byte-for-byte
+
+------------------------------------------------------------------------
+Tier 0 floor — verified IN-LANE on the rebased branch by this rework pass.
+(This lane has no live homeserver, so the live round-trip above is the prior
+dev-stack run's real output; the floor checks below I ran myself.)
+------------------------------------------------------------------------
+  $ python3 -m py_compile knock-approver/approver.py tests/history_bundle_e2e.py
+  -> OK
+  $ python3 tests/announce_unit.py
+  ok: no_flood_on_historical_closed_rooms
+  ok: open_room_still_announced
+  ok: seen_persists_across_cycles_for_open_then_closed
+  ok: ghost_timeout_suppressed_but_real_timeout_announced
+  all tests passed
+  $ python3 tests/self_heal_unit.py
+  ok: first_run_no_cache_login_fresh
+  ok: login_with_cached_device_fails_retries_fresh
+  ok: no_password_no_env_returns_none
+  ok: device_changed_helper
+  all tests passed
+  (unit tests import mautrix.crypto.attachments, which needs pycryptodome — a
+  DECLARED bot dep per docker-compose.yml:117 — installed into the lane here.)
+
+------------------------------------------------------------------------
+Tier 0 surface check (verifiable, the basis for the Tier 0 classification):
+------------------------------------------------------------------------
+  build_room_key_bundle has ZERO production callers:
+  $ git grep -n build_room_key_bundle -- ':!tests/history_bundle_e2e.py'
+  knock-approver/approver.py:1560:async def build_room_key_bundle(room_id) -> dict:
+  (only the definition; the sole caller is the test)
+
+  The bot's served HTTP surface is /signup/api, /signup/api/crosssign,
+  /join/api, /health (app.router.add_* in approver.py). This PR wires
+  build_room_key_bundle to NONE of them and to no sync/event path; it only
+  stores the open crypto store in _ROOM_KEY_BUNDLE_STORE for the follow-up
+  chip (the m.room_key_bundle to-device sender) to call. So this PR changes
+  no user-visible or API-visible behavior of the running bot.
