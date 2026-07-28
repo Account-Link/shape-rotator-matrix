@@ -46,11 +46,12 @@ and the relay's OWN `/sync` cursor lives at
 Absent on first start &rarr; advance to "now" without relaying (skip backlog,
 like the Telegram side).
 
-State is written atomically (tmp + rename) after every relay, so a kill between
-messages never double-delivers; on restart the relay catches up everything
-missed during downtime. The Matrix `/sync` cursor itself lives at
-`~/.shape-bridge-bot/store/next_batch` (`mx.py`'s `_FileSyncStore`); the relay
-owns it while it runs.
+State is written atomically (tmp + rename) after every successful relay, so a
+kill between messages never double-delivers; failed deliveries remain
+retryable. On restart the relay catches up everything missed during downtime.
+The relay's Matrix `/sync` cursor is the separate
+`~/.shape-bridge-bot/store/relay_next_batch` file described above; `mx.py`'s
+debug cursor is independent.
 
 `relay.py` imports the proven client machinery from `mx.py` (`make_client`,
 `load_config`, `_shutdown`) and `tg.py` (`make_client`, `load_chat_id`,

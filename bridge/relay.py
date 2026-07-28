@@ -309,7 +309,7 @@ async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
         if evt.type != EventType.ROOM_MESSAGE:
             state.mark_mx(event_id)
             continue
-        if state.mark_mx(event_id):
+        if event_id in state.mx_seen:
             continue  # already relayed (dedup)
         body = _mx_body(evt)
         if body is None:
@@ -319,8 +319,10 @@ async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
             await tg_send_relay(tg_client, tg_chat_id, name, body)
         except Exception as exc:
             log("tg", f"send failed for {event_id}: {type(exc).__name__}: {exc}")
-            # Don't advance past this event on failure — next pass retries.
+            # Do not mark the event until delivery succeeds. The next pass
+            # must retry a failed send, including after a process restart.
             continue
+        state.mark_mx(event_id)
         state.save()
     state.save()
 
