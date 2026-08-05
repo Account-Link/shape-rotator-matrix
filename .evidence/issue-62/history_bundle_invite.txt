@@ -1,0 +1,108 @@
+MSC4268 bundle delivery wired into an actual approver.py invite path (issue #62)
+=================================================================================
+
+Test:   tests/history_bundle_invite_e2e.py  (wired into tests/run_in_runner.sh
+        after history_bundle_responder_e2e.py, runs against the continuwuity
+        dev stack)
+Branch: ready-62, base staging 9b261a8 (post #59/#65/#64/#67 — chips #60/#61/#63).
+
+Command:
+    cd dev && docker compose up -d && python3 bootstrap.py
+    cd .. && docker build -t sr-test-runner -f tests/Dockerfile .
+    docker run --rm --network dev_default \
+      -e DEV_HS=http://dev-continuwuity-1:6167 -e DEV_REG_TOKEN=dev-token \
+      -v "$(pwd):/repo" -w /repo \
+      sr-test-runner python3 tests/history_bundle_invite_e2e.py
+
+Real stdout (unedited) — re-run AFTER the review-fix pass below:
+
+[invite-e2e] alice=@inv_alice_1785886363_46c5:localhost:46167 bot=@inv_bot_1785886363_46c5:localhost:46167
+[invite-e2e] room=!73PGw8A_bMS4TI5yRMw4vrX2A2sZUaicuVihsjOFWR8
+Device @inv_alice_1785886363_46c5:localhost:46167/AL1fe1 isn't cross-signed
+Device @inv_bot_1785886363_46c5:localhost:46167/BOT41a6 isn't cross-signed
+Device @inv_bot_1785886363_46c5:localhost:46167/BOT41a6 isn't cross-signed
+Didn't find cross-signing key master of @inv_bot_1785886363_46c5:localhost:46167
+Device @inv_alice_1785886363_46c5:localhost:46167/AL1fe1 isn't cross-signed
+Device @inv_alice_1785886363_46c5:localhost:46167/AL1fe1 isn't cross-signed
+Didn't find cross-signing key master of @inv_alice_1785886363_46c5:localhost:46167
+Didn't find cross-signing key master of @inv_alice_1785886363_46c5:localhost:46167
+  [PASS] bot decrypts alice's pre-invite message (inbound session present)
+  [PASS] endorser resolved from the code's minted_by  (@inv_alice_1785886363_46c5:localhost:46167)
+Device @inv_bob_1785886363_46c5:localhost:46167/BBe53a isn't cross-signed
+[room_key_bundle] sent to 1 device(s) of @inv_bob_1785886363_46c5:localhost:46167 for room=!73PGw8A_bMS4TI5yRMw4vrX2A2sZUaicuVihsjOFWR8
+  [PASS] approver._invite_to_children invited the child room  (['!73PGw8A_bMS4TI5yRMw4vrX2A2sZUaicuVihsjOFWR8'])
+joined invite !73PGw8A_bMS4TI5yRMw4vrX2A2sZUaicuVihsjOFWR8
+  [PASS] bob auto-joined the room after the invite
+  [PASS] bob's client can fetch the pre-invite event
+Device @inv_alice_1785886363_46c5:localhost:46167/AL1fe1 isn't cross-signed
+Device @inv_alice_1785886363_46c5:localhost:46167/AL1fe1 isn't cross-signed
+Didn't find cross-signing key master of @inv_alice_1785886363_46c5:localhost:46167
+  [PASS] bob decrypts alice's PRE-INVITE message via the imported bundle  (body='pre-invite history b5984ce5')
+  [PASS] endorsement JSONL contains the (endorser, invitee, code, room_id) edge  ({'endorser': '@inv_alice_1785886363_46c5:localhost:46167', 'invitee': '@inv_bob_1785886363_46c5:localhost:46167', 'code_or_manual': 'testcode', 'room_id': '!73PGw8A_bMS4TI5yRMw4vrX2A2sZUaicuVihsjOFWR8', 'ts': 1785886373.5978115})
+  [PASS] endorsement edge names alice as endorser (code minted_by) and the right code  ({'endorser': '@inv_alice_1785886363_46c5:localhost:46167', 'invitee': '@inv_bob_1785886363_46c5:localhost:46167', 'code_or_manual': 'testcode', 'room_id': '!73PGw8A_bMS4TI5yRMw4vrX2A2sZUaicuVihsjOFWR8', 'ts': 1785886373.5978115})
+
+[invite-e2e] 8/8 checks passed
+
+--------------------------------------------------------------------------------
+Review-fix pass (post-first-draft code review, before this PR was opened):
+  1. _lobby_invite_to_space's endorser fallback was a literal "bot" string,
+     inconsistent with _invite_to_children/_promote's OUR_MXID fallback.
+     Changed to `endorser or OUR_MXID`. Grepped the whole file for other
+     `"bot"`-as-fallback literals — none found.
+  2. Audited every _promote() call site (only one: process_vetting_room,
+     called from sync_loop with sync_loop's own `client` local — the exact
+     object assigned to _ROOM_KEY_BUNDLE_CLIENT). Invariant holds; added an
+     explicit docstring note to _promote so this assumption isn't silent.
+  3. Checked whether signup_handler's entry.get("inviter") is a real field:
+     yes — _mint_welcome_signup_code (pre-existing, unrelated to #62) sets
+     "inviter" on SIGNUP_PATH entries, and signup_handler step 7 already
+     reads it for the DM-inviter flow. Left as-is; not dead code.
+All three tests re-run clean after these fixes (this section + below).
+
+What that proves (every line above is gated by an explicit `log()`/assert in the
+test, and the process exits non-zero on any failure):
+  - alice sends an encrypted message BEFORE the bot invites bob (pre-invite
+    history) and the bot's own crypto store holds the inbound Megolm session.
+  - approver._endorser_for_code resolves the endorser from the knock code's
+    minted_by (issue #62's "code-based joins: endorser is the code's minter").
+  - approver._invite_to_children — the REAL function every vetted-invite path
+    (vetting, lobby) calls after promoting a user, completely unmodified for
+    this test — issues the invite, and _send_room_key_bundle olm-sends the
+    MSC4268 bundle to the invitee's device as a side effect of that same call.
+  - bob's client runs the PRODUCTION responder.py to-device handler (chip #63,
+    untouched): it receives the encrypted m.room_key_bundle, verifies the
+    sender is the room's recorded inviter, downloads + decrypts the
+    attachment, and imports the Megolm sessions.
+  - bob decrypts alice's PRE-INVITE message — proving the bundle, not some
+    other key-sharing path, is what made this possible.
+  - /data/endorsements.jsonl (approver.ENDORSEMENTS_PATH) contains the
+    (endorser, invitee, code_or_manual, room_id, ts) edge with the correct
+    endorser and code.
+
+--------------------------------------------------------------------------------
+Regression checks (this diff touches shared functions — _invite_to_children,
+_promote, _lobby_invite_to_space, signup_handler, cmd_mint — that other
+chips' gating tests exercise). The full `bash tests/run_e2e.sh` wrapper hit a
+pre-existing environment issue on this Windows checkout unrelated to this
+diff (tests/run_in_runner.sh and tests/run_e2e.sh are checked out with CRLF
+line endings under this repo's `core.autocrlf=true`, and `set -euo pipefail\r`
+fails inside the container's bash with "invalid option name" — line 5 of
+run_in_runner.sh, a line untouched by this PR). Ran the two affected gating
+tests directly against the dev stack instead (live approver.py + a manually
+network-aliased landing nginx, bypassing only the broken shell wrapper):
+
+    === tests/vetting_e2e.py ===
+    === 22/22 pass ===
+    (covers _promote + _invite_to_children — the exact functions carrying
+    the new bundle-send + endorsement wiring)
+
+    === tests/lobby_e2e.py ===
+    === 27/27 pass ===
+    (covers _lobby_invite_to_space + _invite_to_children — the lobby path's
+    endorsement-only wiring)
+
+Both suites' full real stdout end with the pass tallies above; no new
+failures relative to the pre-#62 behavior described in PLAN.md. Both were
+re-run again after the review-fix pass above (same 22/22 and 27/27 —
+tallies unaffected since the fixes only touched fallback values / a
+docstring / a dead-code check, not control flow).

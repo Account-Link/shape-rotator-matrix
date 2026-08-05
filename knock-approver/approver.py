@@ -79,6 +79,9 @@ REG_TOKEN     = os.environ.get("CONDUWUIT_REGISTRATION_TOKEN", "")
 CODES_PATH    = Path(os.environ.get("CODES_PATH",        "/data/codes.json"))
 SIGNUP_PATH   = Path(os.environ.get("SIGNUP_CODES_PATH", "/data/signup_codes.json"))
 LOG_PATH      = Path(os.environ.get("LOG_PATH",          "/data/log.jsonl"))
+# Invitation web-of-trust log (issue #58/#62): one JSONL row per bot-issued
+# invite into a room, (endorser, invitee, code_or_manual, room_id, ts).
+ENDORSEMENTS_PATH = Path(os.environ.get("ENDORSEMENTS_PATH", "/data/endorsements.jsonl"))
 SYNC_STATE    = Path(os.environ.get("SYNC_STATE",        "/data/sync_since.txt"))
 HTTP_PORT     = int(os.environ.get("HTTP_PORT", "8001"))
 # Bot's E2EE crypto store (megolm sessions, identity keys, peer device keys).
@@ -94,6 +97,14 @@ ESCROW_PATH   = Path(os.environ.get("ESCROW_PATH", "/data/inbound_sessions.escro
 # MSC4268 builder deliberately uses the same store as the running bot; a
 # second store would not contain the sessions that the bot actually received.
 _ROOM_KEY_BUNDLE_STORE = None
+# Set by sync_loop alongside _ROOM_KEY_BUNDLE_STORE: the mautrix Client whose
+# OlmMachine actually sends the encrypted m.room_key_bundle to-device
+# messages (issue #62). MSC4268 requires the bundle sender to be the SAME
+# identity that issued the room invite, so this is only ever the main bot
+# (TOKEN/AUTH) — every invite path that gets bundle wiring uses that same
+# identity. Never wire this up for LOBBY_AUTH invites (see
+# _lobby_invite_to_space).
+_ROOM_KEY_BUNDLE_CLIENT = None
 
 # Persisted bot passwords for self-mint-on-boot. If the env-provided access
 # token is stale (M_UNKNOWN_TOKEN at startup), the bot logs in with the
@@ -399,6 +410,28 @@ def audit(event):
     with LOG_PATH.open("a") as f:
         f.write(json.dumps(event) + "\n")
 
+def record_endorsement(endorser, invitee, code_or_manual, room_id):
+    """Append one invitation web-of-trust edge to ENDORSEMENTS_PATH (issue
+    #58/#62). Same append-only JSONL shape as audit() — no new storage
+    layer. Called once per successful bot-issued room invite; endorser is
+    the code's minter for code-based joins, or the bot's own mxid for
+    bot-autonomous flows (per issue #62)."""
+    row = {"endorser": endorser, "invitee": invitee,
+           "code_or_manual": code_or_manual, "room_id": room_id,
+           "ts": time.time()}
+    ENDORSEMENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with ENDORSEMENTS_PATH.open("a") as f:
+        f.write(json.dumps(row) + "\n")
+
+def _endorser_for_code(code, fallback):
+    """Resolve the endorser mxid for a knock/lobby code: the code's minter
+    (cmd_mint's minted_by, set on codes minted after issue #62) if known,
+    else `fallback` (the bot's own identity — INITIAL_CODES-seeded or
+    pre-#62 codes have no minter on file, so the bot is the de facto
+    endorser for those bot-autonomous flows)."""
+    entry = _load(CODES_PATH).get(code) or {}
+    return entry.get("minted_by") or fallback
+
 def merge_seed(path, env_key):
     """Merge JSON from env var into the codes file; only adds missing keys."""
     seed = os.environ.get(env_key, "").strip()
@@ -537,20 +570,32 @@ async def _send_msg_raw(room_id, text):
             return (await r.json()).get("event_id")
 
 
-async def _lobby_invite_to_space(mxid):
+async def _lobby_invite_to_space(mxid, endorser=None, code_or_manual="manual"):
     """Invite mxid to the space using the lobby/onboarding bot. Returns
     (status, body[:300]). Caller distinguishes 200 (invited) from 403
-    (already a member — treat as success)."""
+    (already a member — treat as success).
+
+    Deliberately does NOT send an MSC4268 bundle, even though the space
+    itself is unencrypted today: MSC4268 requires the bundle sender to be
+    the SAME identity that issued the m.room.member invite, and this
+    invite goes out as the dedicated lobby/onboarding bot (LOBBY_AUTH), not
+    the main bot whose OlmMachine _send_room_key_bundle uses. The actual
+    E2EE child-room invites that follow (_invite_to_children) go out via
+    the main bot's identity and do get bundles. The endorsement edge IS
+    recorded here — it's about the invite itself, not bundle delivery."""
     async with aiohttp.ClientSession(
         headers={**LOBBY_AUTH, "Content-Type": "application/json"}
     ) as s:
         url = f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(SPACE_ID)}/invite"
         async with s.post(url, json={"user_id": mxid,
                                      "reason": "vetted via lobby airlock"}) as r:
-            return r.status, (await r.text())[:300]
+            status, body = r.status, (await r.text())[:300]
+    if status == 200:
+        record_endorsement(endorser or OUR_MXID, mxid, code_or_manual, SPACE_ID)
+    return status, body
 
 
-async def _invite_to_children(mxid):
+async def _invite_to_children(mxid, endorser=None, code_or_manual="manual"):
     """Invite mxid to each SPACE_CHILD_IDS room using the main bot (TOKEN),
     which has admin PL across the children. Lobby users are typically
     remote (matrix.org), so we can't join on their behalf the way the
@@ -558,11 +603,18 @@ async def _invite_to_children(mxid):
 
     Returns list of child IDs successfully invited (status 200) or already
     a member (status 403). Per-child errors are logged but don't fail the
-    overall promotion."""
+    overall promotion. For each FRESH invite (200), also olm-sends an
+    MSC4268 m.room_key_bundle to mxid (issue #62) and records the
+    endorsement edge — skipped on 403 since the user already has whatever
+    history access they're going to get."""
     invited = []
     for child in SPACE_CHILD_IDS:
         st, body = await _admin_invite(mxid, child, reason="vetted via lobby airlock")
-        if st in (200, 403):
+        if st == 200:
+            invited.append(child)
+            await _send_room_key_bundle(mxid, child)
+            record_endorsement(endorser or OUR_MXID, mxid, code_or_manual, child)
+        elif st == 403:
             invited.append(child)
         else:
             print(f"[lobby] child {child} invite of {mxid} -> {st}: {body[:200]}",
@@ -638,11 +690,21 @@ def _vet(displayname, message, keyword):
     return True, "ok"
 
 
-async def _promote(client, mxid):
+async def _promote(client, mxid, endorser=None, code_or_manual="manual"):
+    """Invite mxid to the space as `client`.
+
+    Note: bundle-sending uses the global _ROOM_KEY_BUNDLE_CLIENT, not the
+    `client` param above — callers must only ever pass the main bot's
+    client here (the same identity that issued the invite, per MSC4268)."""
     try:
         await client.api.request("POST",
             f"/_matrix/client/v3/rooms/{SPACE_ID}/invite",
             content={"user_id": mxid, "reason": "vetted via airlock"})
+        # Same identity as _ROOM_KEY_BUNDLE_CLIENT (main bot / TOKEN), so
+        # this is a correct bundle-send target if SPACE_ID is ever made
+        # E2EE — currently a no-op via _room_history_shareable.
+        await _send_room_key_bundle(mxid, SPACE_ID)
+        record_endorsement(endorser or OUR_MXID, mxid, code_or_manual, SPACE_ID)
         return 200, ""
     except Exception as e:
         return getattr(e, "http_status", 500), str(e)[:300]
@@ -754,12 +816,16 @@ async def process_vetting_room(client, room_id, meta, join_ev, msgs):
         text = (msg.get("content") or {}).get("body", "")
         ok, why = _vet(displayname, text, keyword)
         if ok:
-            st, body = await _promote(client, meta["mxid"])
+            code_or_manual = meta.get("code") or "manual"
+            endorser = _endorser_for_code(meta.get("code"), OUR_MXID)
+            st, body = await _promote(client, meta["mxid"],
+                                      endorser=endorser, code_or_manual=code_or_manual)
             if st == 200:
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["displayname"] = displayname
-                invited_children = await _invite_to_children(meta["mxid"])
+                invited_children = await _invite_to_children(
+                    meta["mxid"], endorser=endorser, code_or_manual=code_or_manual)
                 meta["invited_children"] = invited_children
                 signup_code, signup_url = _mint_welcome_signup_code(meta["mxid"])
                 ack = "nice — invited you to shape rotator. you can leave this room."
@@ -1033,7 +1099,10 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
         displayname = meta.get("displaynames", {}).get(mxid, "")
         ok, why = _vet(displayname, text, keyword)
         if ok:
-            st, body = await _lobby_invite_to_space(mxid)
+            code_or_manual = meta.get("code") or "manual"
+            endorser = _endorser_for_code(meta.get("code"), lobby_mxid)
+            st, body = await _lobby_invite_to_space(
+                mxid, endorser=endorser, code_or_manual=code_or_manual)
             # /invite returning 403 means either "already in the room" or
             # the bot lacks PL. The lobby bot has PL by construction (PL>=50
             # on the space); the only realistic 403 in this flow is
@@ -1047,7 +1116,8 @@ async def process_lobby_room(room_id, meta, new_joins, msgs, lobby_mxid):
                 meta["promoted"] = True
                 meta["promoted_at"] = time.time()
                 meta["promoted_user"] = mxid
-                invited_children = await _invite_to_children(mxid)
+                invited_children = await _invite_to_children(
+                    mxid, endorser=endorser, code_or_manual=code_or_manual)
                 signup_code, signup_url = _mint_welcome_signup_code(mxid)
                 ack = ("you're already in shape rotator — see you in the space."
                        if already_member else
@@ -1387,7 +1457,7 @@ async def cmd_mint(client, room_id, sender, args):
         code = _new_code()
         while code in codes:
             code = _new_code() + secrets.token_hex(2)
-        codes[code] = {"uses_remaining": uses, "label": label}
+        codes[code] = {"uses_remaining": uses, "label": label, "minted_by": sender}
         minted.append(code)
     _save(path, codes)
     audit({"type": "admin_mint", "kind": kind, "n": n, "uses": uses,
@@ -1944,6 +2014,82 @@ async def build_room_key_bundle(room_id) -> dict:
     return {"url": content_uri, "file": file_info}
 
 
+async def _room_history_shareable(room_id):
+    """True if room_id has m.room.encryption set AND history_visibility is
+    shared or world_readable. Invites that don't land in such a room (e.g.
+    the space itself, which is unencrypted) get no MSC4268 bundle — there's
+    nothing useful to export, or the room already discloses history on join."""
+    async with aiohttp.ClientSession(headers=AUTH) as s:
+        try:
+            async with s.get(
+                f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
+                f"/state/m.room.encryption") as r:
+                if r.status != 200:
+                    return False
+        except Exception:
+            return False
+        try:
+            async with s.get(
+                f"{HS}/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}"
+                f"/state/m.room.history_visibility") as r:
+                if r.status != 200:
+                    return False
+                hv = (await r.json()).get("history_visibility")
+        except Exception:
+            return False
+    return hv in ("shared", "world_readable")
+
+
+async def _send_room_key_bundle(mxid, room_id):
+    """Build this bot's MSC4268 bundle for room_id and olm-send it as an
+    encrypted m.room_key_bundle to-device message to every device of mxid
+    (issue #62). The sender is always _ROOM_KEY_BUNDLE_CLIENT's identity —
+    the same one that must have issued the invite, per MSC4268.
+
+    Best-effort: returns False and only logs on any failure (crypto client
+    not up yet, room not a shareable E2EE room, build/upload error, device
+    fetch/send error). A bundle-delivery problem must never fail the invite
+    that already succeeded."""
+    if _ROOM_KEY_BUNDLE_CLIENT is None or _ROOM_KEY_BUNDLE_STORE is None:
+        print(f"[room_key_bundle] crypto client not ready; skipping {room_id} -> {mxid}",
+              flush=True)
+        return False
+    if not await _room_history_shareable(room_id):
+        return False
+    try:
+        bundle = await build_room_key_bundle(room_id)
+    except Exception as e:
+        print(f"[room_key_bundle] build failed room={room_id} mxid={mxid}: {e}",
+              flush=True)
+        return False
+
+    content = {"room_id": room_id, "file": bundle["file"]}
+    event_type = _MAU_EventType.find("m.room_key_bundle", _MAU_EventType.Class.TO_DEVICE)
+    try:
+        devices = await _ROOM_KEY_BUNDLE_CLIENT.crypto._fetch_keys(
+            [_MAU_UserID(mxid)], include_untracked=True)
+    except Exception as e:
+        print(f"[room_key_bundle] device fetch failed mxid={mxid}: {e}", flush=True)
+        return False
+
+    sent = 0
+    for device in devices.get(_MAU_UserID(mxid), {}).values():
+        try:
+            await _ROOM_KEY_BUNDLE_CLIENT.crypto.send_encrypted_to_device(
+                device, event_type, content)
+            sent += 1
+        except Exception as e:
+            print(f"[room_key_bundle] send failed mxid={mxid} "
+                  f"device={device.device_id} room={room_id}: {e}", flush=True)
+    if sent:
+        print(f"[room_key_bundle] sent to {sent} device(s) of {mxid} for room={room_id}",
+              flush=True)
+    else:
+        print(f"[room_key_bundle] no devices reachable for {mxid} in room={room_id}",
+              flush=True)
+    return sent > 0
+
+
 async def sync_loop():
     """Mautrix-based sync loop with full E2EE support.
 
@@ -1987,8 +2133,9 @@ async def sync_loop():
     cs = _MAU_PgCryptoStore(account_id=OUR_MXID or "approver",
                              pickle_key=f"{OUR_MXID}:{device_id}", db=db)
     await cs.open()
-    global _ROOM_KEY_BUNDLE_STORE
+    global _ROOM_KEY_BUNDLE_STORE, _ROOM_KEY_BUNDLE_CLIENT
     _ROOM_KEY_BUNDLE_STORE = cs
+    _ROOM_KEY_BUNDLE_CLIENT = client
     ss = _StateStore(state_store)
     olm = _MAU_OlmMachine(client, cs, ss)
     olm.share_keys_min_trust = _MAU_TrustState.UNVERIFIED
@@ -2203,7 +2350,14 @@ async def signup_handler(request):
     # --- Step 3: admin invites the new user to the space ---
     st, _body = await _admin_invite(mxid, SPACE_ID)
     steps_done["space_invited"] = (st == 200)
-    if st != 200:
+    if st == 200:
+        # Same identity as _ROOM_KEY_BUNDLE_CLIENT (main bot / TOKEN) issued
+        # this invite, so bundle-sending is identity-correct (issue #62).
+        # No-op today via _room_history_shareable since the space isn't E2EE.
+        await _send_room_key_bundle(mxid, SPACE_ID)
+        record_endorsement(entry.get("inviter") or entry.get("minted_by") or OUR_MXID,
+                           mxid, code, SPACE_ID)
+    else:
         print(f"[signup] admin invite of {mxid} -> {st}: {_body[:200]}", flush=True)
 
     # --- Step 4: new user sets display name (if requested) ---

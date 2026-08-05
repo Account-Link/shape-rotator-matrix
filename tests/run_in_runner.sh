@@ -133,4 +133,12 @@ DEV_HS="$HS" \
   DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
   python3 tests/history_bundle_responder_e2e.py
 
+# Issue #62: MSC4268 bundle sending wired into approver.py's own invite
+# paths (_invite_to_children etc), not a hand-built bundle. Also proves
+# the /data/endorsements.jsonl web-of-trust edge gets recorded.
+echo "[runner] === history_bundle_invite_e2e.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  python3 tests/history_bundle_invite_e2e.py
+
 echo "[runner] all gating tests passed"
