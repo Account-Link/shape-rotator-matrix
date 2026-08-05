@@ -1,0 +1,5 @@
+::error::KNOCK_APPROVER_TOKEN could not be validated — whoami returned 500 (expected 200).
+::error::This is probably NOT a stale token: is mtrx.shaperotator.xyz reachable from the runner? Deploy aborted (fail-closed).
+::error::PHALA_API_KEY is stale or invalid — 'phala cvms get dstack-matrix' rejected the key.
+::error::Rotate it at cloud.phala.com → API keys, then 'gh secret set PHALA_API_KEY'.
+::error::validate-creds: 2 check(s) failed — deploy aborted before the pre-deploy sleep.

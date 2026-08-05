@@ -64,6 +64,17 @@ jobs:
       - name: install phala CLI
         run: npm install -g phala
 
+      - name: validate creds (fail fast on stale secrets)
+        # Runs BEFORE build .env and the 10-min pre-deploy sleep so a stale
+        # KNOCK_APPROVER_TOKEN or PHALA_API_KEY aborts the deploy in seconds,
+        # naming which secret(s) are bad. Checks BOTH in one run so two stale
+        # secrets cost one cycle to discover, not two (see issue #43). Prints
+        # no secret values. See deploy/validate-creds.sh.
+        env:
+          KNOCK_APPROVER_TOKEN: ${{ secrets.KNOCK_APPROVER_TOKEN }}
+          PHALA_API_KEY: ${{ secrets.PHALA_API_KEY }}
+        run: bash deploy/validate-creds.sh
+
       - name: build .env
         env:
           NAMECHEAP_USERNAME: ${{ secrets.NAMECHEAP_USERNAME }}
