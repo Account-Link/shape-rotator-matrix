@@ -14,6 +14,17 @@
 #   4. Update GitHub secret KNOCK_APPROVER_TOKEN (token never echoed)
 #   5. Re-enable the deploy workflow if disabled
 #   6. Trigger a deploy run
+#
+# Spec impact — deploy validation (added 2026-08-05, PR #75 / issue #43):
+# This script rotates ONLY KNOCK_APPROVER_TOKEN. The deploy workflow now runs
+# `deploy/validate-creds.sh` as its first step, checking BOTH
+# KNOCK_APPROVER_TOKEN (whoami) and PHALA_API_KEY (phala cvms get dstack-matrix)
+# BEFORE the 10-minute pre-deploy sleep. Consequence for this runbook: if
+# PHALA_API_KEY is *also* stale (it was the cycle-2 failure in #43, which this
+# script does not touch), the deploy triggered in step 6 now fails fast (~2s,
+# named) instead of burning a full ~17-min cycle. To clear it, rotate at
+# cloud.phala.com → API keys, then:
+#   gh secret set PHALA_API_KEY --repo "$(git config --get remote.origin.url)"
 set -euo pipefail
 
 HS=https://mtrx.shaperotator.xyz
