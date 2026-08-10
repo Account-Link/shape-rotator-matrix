@@ -1,0 +1,183 @@
+name: promote staging to prod
+
+# The missing step between "staging is green" and "prod is running it".
+#
+# The chip lane merges to `staging` (auto-merge-staging.sh, evidence-gated).
+# Nothing then moved `staging` -> `main` -> tag -> deploy, so 9 merged PRs sat
+# undeployed from 2026-05-25 to 2026-08-10. See issue #82.
+#
+# Promotion stays a human dispatch on purpose: auto-merge-staging.sh already
+# refuses to auto-merge repos whose lane base is `main` ("merging to a release
+# branch stays the operator's call"). This automates the mechanics, not the
+# decision.
+#
+# HOW TO RUN: Actions -> "promote staging to prod" -> Run workflow, and pick
+# the **staging** branch in the ref dropdown. Running it from any other branch
+# fails immediately — e2e below must test staging's code, not main's.
+#
+# BOOTSTRAP (one time, and it is a chicken-and-egg): GitHub only exposes a
+# workflow_dispatch workflow once the file exists on the DEFAULT branch. This
+# file lands on `staging` first, so the button will not appear until `main` has
+# it — and advancing `main` is exactly what this workflow does. So the FIRST
+# promotion has to be done by hand:
+#
+#   git fetch origin
+#   git push origin origin/staging:refs/heads/main
+#   git tag -a v0.7.04 origin/staging -m "promote staging -> prod" && git push origin v0.7.04
+#   gh workflow run deploy.yml --ref main -f delay_seconds=600
+#
+# After that `main` carries this file, the button appears, and every subsequent
+# promotion is one dispatch.
+#
+# WHY IT DISPATCHES DEPLOY INSTEAD OF RELYING ON THE TAG: a tag pushed using
+# GITHUB_TOKEN does not trigger `on: push: tags` (GitHub suppresses workflow
+# runs from events raised by GITHUB_TOKEN, with workflow_dispatch and
+# repository_dispatch as the only exceptions). The tag is still created as the
+# release marker; the deploy is kicked off explicitly.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create. Leave blank to auto-increment the latest v* tag (v0.7.03 -> v0.7.04).'
+        required: false
+        default: ''
+      delay_seconds:
+        description: 'Passed to deploy: seconds between the heads-up post and the CVM restart.'
+        required: false
+        default: '600'
+      dry_run:
+        description: 'Run every check and print what would happen, without pushing main, the tag, or the deploy.'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: promote-prod
+  cancel-in-progress: false
+
+jobs:
+  # Test staging's code BEFORE main is touched. If this fails, main is never
+  # moved — a broken staging can't leave main pointing at code that fails e2e.
+  e2e:
+    uses: ./.github/workflows/test.yml
+
+  promote:
+    needs: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: refuse to run from anywhere but staging
+        run: |
+          if [ "${{ github.ref_name }}" != "staging" ]; then
+            echo "::error::dispatched from '${{ github.ref_name }}' — re-run and pick the 'staging' branch."
+            echo "The e2e job above tested '${{ github.ref_name }}', so promoting now would ship untested code."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history + tags for ancestry and versioning
+
+      - name: verify staging fast-forwards onto main
+        id: check
+        run: |
+          git fetch --quiet origin main staging --tags
+          MAIN=$(git rev-parse origin/main)
+          STAGING=$(git rev-parse origin/staging)
+          echo "main=$MAIN"; echo "staging=$STAGING"
+
+          if [ "$MAIN" = "$STAGING" ]; then
+            echo "::error::main already equals staging — nothing to promote."
+            exit 1
+          fi
+
+          # Non-fast-forward means main has commits staging doesn't (a hotfix
+          # landed directly on main, or histories diverged). Refuse rather than
+          # merge: silently creating a merge commit here would ship whatever
+          # that divergence is.
+          if ! git merge-base --is-ancestor "$MAIN" "$STAGING"; then
+            echo "::error::main is not an ancestor of staging — refusing to promote."
+            echo "Commits on main but not staging:"
+            git log --oneline "$STAGING".."$MAIN"
+            echo "Resolve by merging main into staging first, then re-run."
+            exit 1
+          fi
+
+          N=$(git rev-list --count "$MAIN".."$STAGING")
+          echo "count=$N" >> "$GITHUB_OUTPUT"
+          echo "staging_sha=$STAGING" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Promoting $N commit(s)"
+            echo '```'
+            git log --oneline "$MAIN".."$STAGING"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: compute release tag
+        id: tag
+        env:
+          # via env, not inline ${{ }}, so the input can't break out of the shell
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          if [ -n "$REQUESTED" ]; then
+            TAG="$REQUESTED"
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+              echo "::error::tag $TAG already exists"
+              exit 1
+            fi
+          else
+            LAST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+            [ -n "$LAST" ] || { echo "::error::no existing v* tag to increment; pass one explicitly"; exit 1; }
+            # Scheme in use: v0.7 -> v0.7.01 -> v0.7.02 -> v0.7.03 (2-digit patch).
+            # Plain bash on purpose: an inline python block inside a YAML block
+            # scalar has to sit at exactly the block indent or it either breaks
+            # the YAML or reaches python indented. Not worth the footgun here.
+            if [[ "$LAST" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              MAJ="${BASH_REMATCH[1]}"; MIN="${BASH_REMATCH[2]}"; PATCH="${BASH_REMATCH[3]}"
+              # 10# forces base 10 — without it "08"/"09" are invalid octal and
+              # the arithmetic aborts. Bites exactly twice per hundred releases.
+              TAG=$(printf 'v%s.%s.%0*d' "$MAJ" "$MIN" "${#PATCH}" "$((10#$PATCH + 1))")
+            elif [[ "$LAST" =~ ^v([0-9]+)\.([0-9]+)$ ]]; then
+              TAG=$(printf 'v%s.%s.01' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")
+            else
+              echo "::error::cannot parse latest tag '$LAST' — pass an explicit tag input"
+              exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "next tag: $TAG (previous: $(git tag --list 'v*' --sort=-v:refname | head -n1))"
+          echo "**Tag:** \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: dry run summary
+        if: inputs.dry_run
+        run: |
+          echo "DRY RUN — nothing pushed."
+          echo "Would fast-forward main to ${{ steps.check.outputs.staging_sha }}"
+          echo "Would create tag ${{ steps.tag.outputs.tag }}"
+          echo "Would dispatch deploy.yml on main with delay_seconds=${{ inputs.delay_seconds }}"
+          echo "**DRY RUN — nothing pushed.**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: fast-forward main and push the tag
+        if: '!inputs.dry_run'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push origin "${{ steps.check.outputs.staging_sha }}:refs/heads/main"
+          git tag -a "${{ steps.tag.outputs.tag }}" "${{ steps.check.outputs.staging_sha }}" \
+            -m "promote staging -> prod (${{ steps.check.outputs.count }} commits)"
+          git push origin "refs/tags/${{ steps.tag.outputs.tag }}"
+
+      - name: dispatch deploy
+        if: '!inputs.dry_run'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # See the header note: the tag push above cannot trigger deploy.yml
+          # by itself, so trigger it here. workflow_dispatch is one of the two
+          # events GitHub still honors from GITHUB_TOKEN.
+          gh workflow run deploy.yml --ref main -f delay_seconds='${{ inputs.delay_seconds }}'
+          echo "deploy dispatched on main. Heads-up posts to #matrix-devops, then ~${{ inputs.delay_seconds }}s before the CVM restarts."
+          echo "Deploy dispatched on \`main\`." >> "$GITHUB_STEP_SUMMARY"
