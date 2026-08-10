@@ -12,12 +12,24 @@
 #
 # Teardown:
 #   docker compose down -v           # -v drops the rocksdb volume for a clean slate
+#
+# Running two dev stacks at once (parallel agent lanes on one box):
+#   DEV_STACK_SUFFIX=-a DEV_HS_PORT=46168 docker compose up -d
+#   DEV_HS=http://localhost:46168 python3 bootstrap.py
+# The suffix scopes the compose project *and* its named volume, so a
+# `docker compose down -v` in one lane cannot wipe another lane's rocksdb.
+# Without either var this behaves exactly as it always has.
+name: shape-rotator-dev${DEV_STACK_SUFFIX:-}
 services:
   continuwuity:
     image: ghcr.io/continuwuity/continuwuity:latest
     ports:
-      - "127.0.0.1:46167:6167"
+      - "127.0.0.1:${DEV_HS_PORT:-46167}:6167"
     environment:
+      # Deliberately NOT tied to DEV_HS_PORT. This is the server's identity —
+      # it appears in every mxid and in bootstrap.py's `via` entries — not an
+      # endpoint anyone dials. Federation is off, so it never has to resolve,
+      # and holding it constant keeps mxids stable across lanes.
       CONDUWUIT_SERVER_NAME: "localhost:46167"
       CONDUWUIT_DATABASE_BACKEND: rocksdb
       CONDUWUIT_DATABASE_PATH: /var/lib/conduwuit

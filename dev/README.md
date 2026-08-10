@@ -69,3 +69,30 @@ HOMESERVER=http://localhost:46167 \
 - **Port choice**: we use `46167` (rather than the tutorial-default `16167`)
   because other throwaway repro containers in the workspace tend to grab the
   lower ports.
+
+## Running two dev stacks at once
+
+Parallel agent lanes on one box need separate compose projects and separate
+host ports, or `docker compose down -v` in one lane wipes the other's rocksdb:
+
+```bash
+# lane A — defaults, exactly as before
+docker compose up -d
+python3 bootstrap.py
+
+# lane B — concurrent, fully isolated
+DEV_STACK_SUFFIX=-b DEV_HS_PORT=46168 docker compose up -d
+DEV_HS=http://localhost:46168 python3 bootstrap.py
+```
+
+`DEV_STACK_SUFFIX` scopes the compose project name and its named volume;
+`DEV_HS_PORT` moves the published port. Neither is required — with both unset
+this behaves as it always has.
+
+`CONDUWUIT_SERVER_NAME` stays `localhost:46167` in every lane on purpose. It is
+the server's identity (it appears in mxids and in `bootstrap.py`'s `via`
+entries), not an endpoint anyone dials, and federation is off in dev.
+
+`tests/run_e2e.sh` derives its own compose project from the checkout path, so
+two worktrees running the e2e suite concurrently do not collide. Override with
+`E2E_PROJECT` if you need a specific name.
