@@ -14,7 +14,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-COMPOSE=(docker compose -f docker-compose.test.yml -p shape-rotator-e2e)
+# Project name is derived from the checkout path so two worktrees on the same
+# box get separate compose projects (and therefore separate named volumes).
+# Without this, the `down -v --remove-orphans` below tears down whichever run
+# got there first — the two lanes silently destroy each other. Same checkout
+# run twice still reuses one project, which is what the teardown expects.
+E2E_PROJECT="${E2E_PROJECT:-shape-rotator-e2e-$(git rev-parse --show-toplevel | cksum | cut -d' ' -f1)}"
+echo "[run_e2e] compose project: $E2E_PROJECT" >&2
+COMPOSE=(docker compose -f docker-compose.test.yml -p "$E2E_PROJECT")
 
 cleanup() {
   rc=$?
