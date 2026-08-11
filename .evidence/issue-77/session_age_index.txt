@@ -1,0 +1,21 @@
+[session_index] bot=@sai_bot_1787014408_54da:localhost:46167 alice=@sai_alice_1787014408_54da:localhost:46167
+[session_index] room=!ByjFI4a_t_QAhLOwxSmXALCgLsAuB1kbIMX-NSu0oS4
+Device @sai_alice_1787014408_54da:localhost:46167/ALICE744a isn't cross-signed
+Device @sai_bot_1787014408_54da:localhost:46167/BOT8fd5 isn't cross-signed
+Device @sai_bot_1787014408_54da:localhost:46167/BOT8fd5 isn't cross-signed
+Didn't find cross-signing key master of @sai_bot_1787014408_54da:localhost:46167
+Encryption info for !ByjFI4a_t_QAhLOwxSmXALCgLsAuB1kbIMX-NSu0oS4 not found in state store, fetching from server
+Failed to decrypt $XG5s0hDSr5ZLXCPgfltdLRAN1J2jY3NGgW706yGdSRY: Failed to decrypt megolm event: no session with given ID Jc4aujXRMUkpyUAReJkivmSnr84Mrh2zyjVgDrIszEU found
+  [PASS] bot received + indexed alice's first encrypted message  (1 encrypted event(s) recorded)
+Didn't find cross-signing key master of @sai_bot_1787014408_54da:localhost:46167
+  [PASS] rotation produced a second encrypted message after the drop  (1 encrypted event(s) recorded)
+  [PASS] >1 distinct megolm session exists (rotation worked)  (2 session(s): ['Jc4aujXRMUkpyUAReJkivmSnr84Mrh2zyjVgDrIszEU', 'XQI3UYB2a4iXG80OpcmbW38JqfDtJiDMcgwbfJ60mxE'])
+  [PASS] bot has >=2 inbound megolm sessions for the room  (2 inbound: ['Jc4aujXRMUkpyUAReJkivmSnr84Mrh2zyjVgDrIszEU', 'XQI3UYB2a4iXG80OpcmbW38JqfDtJiDMcgwbfJ60mxE'])
+[session_index] index[!ByjFI4a_t_QAhLOwxSmXALCgLsAuB1kbIMX-NSu0oS4] = {"Jc4aujXRMUkpyUAReJkivmSnr84Mrh2zyjVgDrIszEU": 1787014408702, "XQI3UYB2a4iXG80OpcmbW38JqfDtJiDMcgwbfJ60mxE": 1787014408714}
+  [PASS] every crypto_megolm_inbound_session has an index entry (#3)  (all 2 inbound covered)
+  [PASS] each indexed ts == earliest origin_server_ts for its session (#4)  (2 entries checked)
+  [PASS] index covers + is correct for every /messages session  (2 ground-truth session(s))
+  [PASS] index survives a process restart (#5)  (2 entry(ies) reloaded from session_age_index.json)
+  [PASS] persisted index file exists on disk (the restart source)  (session_age_index.json size=190)
+
+[session_index] 9/9 checks passed
