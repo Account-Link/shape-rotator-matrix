@@ -437,6 +437,12 @@ VETTING_MAX_TRIES = int(os.environ.get("VETTING_MAX_TRIES",   "3"))
 LOBBY_PATH         = Path(os.environ.get("LOBBY_PATH",        "/data/lobby.json"))
 LOBBY_TIMEOUT      = int(os.environ.get("LOBBY_TIMEOUT_SEC",  "7200"))
 LOBBY_MAX_TRIES    = int(os.environ.get("LOBBY_MAX_TRIES",    "3"))
+
+# Retention rooms (issue #78 / epic #76). The bot's in-force retention
+# policy per room — write-once at creation; this is the source of truth
+# chip 3 (#79) reads to withhold keys, NOT the room's m.room.retention
+# state (which is mutable on the wire and therefore not authoritative).
+RETENTION_PATH     = Path(os.environ.get("RETENTION_PATH",     "/data/retention_rooms.json"))
 # Federated users (matrix.org) can fast-join the lobby before continuwuity
 # has finished propagating room state outward. The first challenge message
 # posted ~immediately after observing the join can race that propagation
@@ -1426,10 +1432,308 @@ async def cmd_revoke(client, room_id, sender, args):
     return f"unknown code: {code}"
 
 
+# --- Retention room factory (issue #78 / epic #76 chip 2) ---
+#
+# A retention room is bot-created: the bot is sole PL100, the room is E2EE,
+# m.room.retention carries the policy window, join_rule is restricted to the
+# space + the room is a space child, and a plain-language policy message is
+# pinned. The policy is IMMUTABLE at creation: it is recorded once in the
+# RETENTION_PATH store and never overwritten. Chip 3 (#79) reads THAT store
+# (not the room's m.room.retention state) to decide which keys to withhold,
+# which is exactly why a later state-event change has no effect on the
+# enforced policy.
+
+def _parse_duration(s):
+    """Parse '7d' / '12h' / '30d' / '2w' / '90m' / '3600s' into seconds.
+
+    A bare integer is treated as seconds. Raises ValueError on malformed
+    input. Used by !retention-room.
+    """
+    s = (s or "").strip().lower()
+    if not s:
+        raise ValueError("empty duration")
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    if s[-1] in units:
+        n, unit = s[:-1], s[-1]
+    else:
+        n, unit = s, "s"
+    try:
+        amount = int(n)
+    except ValueError:
+        raise ValueError(f"bad duration {s!r}: expected a number")
+    if amount <= 0:
+        raise ValueError(f"duration must be positive, got {amount}")
+    return amount * units[unit]
+
+
+def _render_window(seconds):
+    """Render a window (seconds) as a short human label (2w/7d/12h/90m/3600s)."""
+    seconds = int(seconds)
+    for secs, suffix in ((604800, "w"), (86400, "d"), (3600, "h"), (60, "m")):
+        if seconds % secs == 0:
+            return f"{seconds // secs}{suffix}"
+    return f"{seconds}s"
+
+
+RETENTION_POLICY_TEMPLATE = """\
+📜 Retention policy — immutable at room creation
+
+Room: {name}
+Policy window: {window} ({window_seconds}s)
+
+What this DOES: the bot (sole PL100) withholds megolm room keys older than the
+policy window from members who receive history through it. New joiners cannot
+decrypt messages older than the window via the bot's key custody.
+
+What this DOES NOT do: delete anything from the server. Events and media stay
+stored. Members who were present when a message was sent keep their own keys
+and local plaintext. This is retention as access control, not deletion.
+
+This policy was set when the room was created and is the one the bot enforces
+permanently; it cannot be changed — not by the bot, not by any admin. A later
+m.room.retention state change in this room is ignored and logged. To change
+retention, create a new room.
+"""
+
+
+def _retention_policy_text(name, window_seconds):
+    return RETENTION_POLICY_TEMPLATE.format(
+        name=name, window=_render_window(window_seconds),
+        window_seconds=int(window_seconds))
+
+
+def _load_retention():
+    return _load(RETENTION_PATH)
+
+
+def _save_retention(state):
+    _save(RETENTION_PATH, state)
+
+
+def _record_retention_policy(room_id, record):
+    """Write-once: record the in-force retention policy for a room.
+
+    Immutability is the whole point (epic #76). If a record already exists
+    for this room it is NEVER overwritten — we raise rather than silently
+    weakening the guarantee. Chip 3 (#79) reads this record, not the room's
+    m.room.retention state.
+    """
+    state = _load_retention()
+    if room_id in state:
+        raise RuntimeError(
+            f"retention policy for {room_id} already recorded; refusing to "
+            f"overwrite (immutable-at-creation)")
+    state[room_id] = record
+    _save_retention(state)
+
+
+async def _create_retention_room(name, window_seconds, creator=None):
+    """Create a bot-owned retention room and record its immutable policy.
+
+    Returns a dict: {room_id, name, window_seconds, max_lifetime_ms,
+    pinned_event_id, policy_text, space_id, created_by}.
+
+    The bot is creator + sole PL100; the room is E2EE; m.room.retention carries
+    the window (ms, per spec); join_rule is restricted to SPACE_ID so existing
+    space members auto-join; the room is linked as a space child; a plain-
+    language policy message is pinned. The policy is recorded write-once in
+    RETENTION_PATH — the in-force policy chip 3 (#79) reads, NOT the room state.
+    """
+    if not OUR_MXID:
+        raise RuntimeError("cannot create retention room: OUR_MXID unknown "
+                           "(sync_loop must run /whoami first)")
+    if not SPACE_ID:
+        raise RuntimeError("cannot create retention room: SPACE_ID not set")
+
+    via_server = SERVER_NAME or OUR_MXID.split(":", 1)[1]
+    max_lifetime_ms = int(window_seconds) * 1000
+    policy_text = _retention_policy_text(name, window_seconds)
+    human = _render_window(window_seconds)
+
+    # public_chat preset ⇒ history_visibility=shared, which the bot's key
+    # custody requires to cover the room (epic #76). join_rule is overridden
+    # to restricted via initial_state. visibility=private keeps it out of the
+    # room directory. room_version 11: continuwuity's default (v12) produced
+    # rooms the local HS did not authoritatively own — see _create_lobby_room_raw.
+    body = {
+        "name": name,
+        "topic": (f"retention room — bot sole admin; policy window {human} "
+                  f"(immutable at creation)"),
+        "preset": "public_chat",
+        "visibility": "private",
+        "room_version": "11",
+        # Bot is the ONLY user at PL100; nobody else is ≥50 (users_default 0).
+        # state_default stays at the preset default (50) so only the bot can
+        # set state in this room.
+        "power_level_content_override": {
+            "users": {OUR_MXID: 100},
+            "users_default": 0,
+        },
+        "initial_state": [
+            {"type": "m.room.history_visibility", "state_key": "",
+             "content": {"history_visibility": "shared"}},
+            {"type": "m.room.encryption", "state_key": "",
+             "content": {"algorithm": "m.megolm.v1.aes-sha2"}},
+            # m.room.retention is an unknown state type to continuwuity; the
+            # server accepts and stores it (epic #76). max_lifetime is in
+            # MILLISECONDS per the Matrix room retention spec.
+            {"type": "m.room.retention", "state_key": "",
+             "content": {"max_lifetime": max_lifetime_ms}},
+            {"type": "m.room.join_rules", "state_key": "",
+             "content": {
+                 "join_rule": "restricted",
+                 "allow": [{"type": "m.room_membership", "room_id": SPACE_ID}],
+             }},
+        ],
+    }
+
+    async with aiohttp.ClientSession(
+        headers={**AUTH, "Content-Type": "application/json"}
+    ) as s:
+        # 1. createRoom — bot becomes creator + sole PL100 + auto-joined.
+        async with s.post(f"{HS}/_matrix/client/v3/createRoom", json=body) as r:
+            if r.status != 200:
+                raise RuntimeError(
+                    f"createRoom retention {r.status}: {(await r.text())[:300]}")
+            room_id = (await r.json())["room_id"]
+
+        # 2. Link as a space child so the room appears in the space.
+        child_url = (f"{HS}/_matrix/client/v3/rooms/"
+                     f"{urllib.parse.quote(SPACE_ID)}/state/m.space.child/"
+                     f"{urllib.parse.quote(room_id)}")
+        async with s.put(child_url, json={"via": [via_server]}) as r:
+            if r.status != 200:
+                raise RuntimeError(
+                    f"m.space.child {r.status}: {(await r.text())[:300]}")
+
+        # 3. Send the plain-language policy message as a plaintext NOTICE.
+        # This is a deliberate transparency statement that every member and
+        # observer must be able to read without megolm keys; the retention
+        # guarantee itself is enforced by key custody (chip 3), independent
+        # of this message's transport.
+        txn = f"sr-retention-{secrets.token_hex(8)}"
+        msg_url = (f"{HS}/_matrix/client/v3/rooms/"
+                   f"{urllib.parse.quote(room_id)}/send/m.room.message/{txn}")
+        async with s.put(msg_url, json={
+                "msgtype": "m.text", "body": policy_text}) as r:
+            if r.status != 200:
+                raise RuntimeError(
+                    f"policy message {r.status}: {(await r.text())[:300]}")
+            pinned_event_id = (await r.json())["event_id"]
+
+        # 4. Pin the policy message.
+        pin_url = (f"{HS}/_matrix/client/v3/rooms/"
+                   f"{urllib.parse.quote(room_id)}/state/m.room.pinned_events")
+        async with s.put(pin_url, json={"pinned": [pinned_event_id]}) as r:
+            if r.status != 200:
+                raise RuntimeError(
+                    f"m.room.pinned_events {r.status}: {(await r.text())[:300]}")
+
+    record = {
+        "name": name,
+        "window_seconds": int(window_seconds),
+        "max_lifetime_ms": max_lifetime_ms,
+        "created_at": time.time(),
+        "created_by": creator or OUR_MXID,
+        "policy_text": policy_text,
+        "pinned_event_id": pinned_event_id,
+        "space_id": SPACE_ID,
+    }
+    _record_retention_policy(room_id, record)
+    audit({"type": "retention_room_created", "room": room_id, "name": name,
+           "window_seconds": int(window_seconds), "pinned": pinned_event_id,
+           "created_by": record["created_by"]})
+    return {**record, "room_id": room_id}
+
+
+async def _detect_retention_tamper(client, rooms_data):
+    """Scan one /sync batch for m.room.retention state changes in known
+    retention rooms. For each change whose value differs from the immutable
+    in-force policy, audit + post a notice to OPERATOR_NOTIFY_ROOM.
+
+    The in-force policy store is intentionally NOT touched: a state-event
+    change on the wire does not change what the bot enforces (chip 3 reads
+    the store). This is the 'log and post a notice if one is attempted'
+    work item of issue #78.
+    """
+    state = _load_retention()
+    if not state:
+        return
+    join = (rooms_data or {}).get("join", {}) or {}
+    for room_id, record in list(state.items()):
+        room = join.get(room_id)
+        if not room:
+            continue
+        events = list((room.get("state") or {}).get("events") or [])
+        events += list((room.get("timeline") or {}).get("events") or [])
+        recorded_ms = record.get("max_lifetime_ms")
+        for ev in events:
+            if ev.get("type") != "m.room.retention" or ev.get("state_key") != "":
+                continue
+            attempted_ms = (ev.get("content") or {}).get("max_lifetime")
+            # Matching the in-force value = the bot's own create-time set or a
+            # no-op re-send; not a tamper. Only a DIFFERING value is flagged.
+            if attempted_ms == recorded_ms:
+                continue
+            sender = ev.get("sender")
+            audit({"type": "retention_tamper", "room": room_id, "by": sender,
+                   "attempted_ms": attempted_ms, "in_force_ms": recorded_ms})
+            print(f"[retention] tamper in {room_id}: sender={sender} set "
+                  f"max_lifetime={attempted_ms} (in-force={recorded_ms}); "
+                  f"policy unchanged", flush=True)
+            if OPERATOR_NOTIFY_ROOM:
+                try:
+                    await _send_msg(client, OPERATOR_NOTIFY_ROOM,
+                        f"⚠️ retention tamper in {room_id}: {sender} set "
+                        f"m.room.retention max_lifetime={attempted_ms} ms; "
+                        f"in-force policy is still {recorded_ms} ms "
+                        f"({record.get('window_seconds')}s) — ignored.")
+                except Exception as e:
+                    print(f"[retention] notice send failed: {e}", flush=True)
+
+
+async def cmd_retention_room(client, room_id, sender, args):
+    """!retention-room <name> <duration> — create a bot-owned retention room.
+
+    The bot becomes sole PL100; the room is E2EE with an m.room.retention
+    policy window; it is restricted-joined to the space and linked as a space
+    child. The policy is immutable at creation (epic #76). <duration> is like
+    7d, 12h, 30d, 2w, 3600s, 90m.
+
+    Examples:
+      !retention-room weekly-standup 7d
+      !retention-room ephemeral 24h
+    """
+    parts = args.split()
+    if len(parts) != 2:
+        return ("usage: !retention-room <name> <duration>   "
+                "(e.g. !retention-room ops-chat 7d)")
+    name, dur = parts
+    if not name or len(name) > 64:
+        return f"!retention-room: name must be 1..64 chars, got {name!r}"
+    try:
+        window_seconds = _parse_duration(dur)
+    except ValueError as e:
+        return f"!retention-room: {e}"
+    try:
+        rec = await _create_retention_room(
+            name, window_seconds, creator=sender)
+    except Exception as e:
+        audit({"type": "retention_room_failed", "name": name, "window": dur,
+               "err": str(e)[:300], "created_by": sender})
+        return f"!retention-room failed: {type(e).__name__}: {e}"
+    return (f"created retention room {rec['room_id']}\n"
+            f"  name:   {name}\n"
+            f"  window: {_render_window(window_seconds)} ({window_seconds}s)\n"
+            f"  policy: immutable at creation; bot sole PL100; "
+            f"space-child of {SPACE_ID}")
+
+
 COMMANDS = {
     "!mint": cmd_mint,
     "!codes": cmd_codes,
     "!revoke": cmd_revoke,
+    "!retention-room": cmd_retention_room,
     "!help": None,  # filled below
 }
 
@@ -1791,6 +2095,14 @@ async def sync_loop():
             await announce_lobby_events(client)
         except Exception as e:
             print(f"[announce_lobby_events] {type(e).__name__}: {e}", flush=True)
+
+        # Retention tamper detection (issue #78): if a known retention room
+        # shows an m.room.retention state change this cycle, log + post a
+        # notice. The in-force policy (write-once store) is NEVER updated.
+        try:
+            await _detect_retention_tamper(client, data.get("rooms", {}))
+        except Exception as e:
+            print(f"[retention] tamper scan error: {type(e).__name__}: {e}", flush=True)
 
         # Drain queued admin commands (event handler may have populated
         # them with decrypted message events).

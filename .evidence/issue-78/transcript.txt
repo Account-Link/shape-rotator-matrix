@@ -1,0 +1,24 @@
+[retention_e2e] bot=@ret_bot_3cc36c:localhost:46167 member=@ret_member_3cc36c:localhost:46167 attacker=@ret_atk_3cc36c:localhost:46167
+  [PASS] 1a. room created via factory (command core)  (room=!0qO6gexgV9ExKSCqwy:localhost:46167)
+  [PASS] 1b. !retention-room command wrapper creates a room + replies  (reply='created retention room !gOLjZylApBu2qH6olp:localhost:46167\n  name:   ops-chat\n  ')
+  [PASS] 1c. !retention-room rejects missing args  (reply='usage: !retention-room <name> <duration>   (e.g. !retention-')
+  [PASS] 1d. !retention-room rejects a bad duration  (reply="!retention-room: bad duration 'bogus': expected a number")
+  [PASS] 2a. power_levels readable  (status=200)
+  [PASS] 2b. bot is PL100  (bot_pl=100)
+  [PASS] 2c. no other user at >=50 (bot is sole PL100)  (ge50={'@ret_bot_3cc36c:localhost:46167': 100})
+  [PASS] 2d. users_default == 0  (users_default=0)
+  [PASS] 3a. m.room.encryption present (megolm)  (200 {'algorithm': 'm.megolm.v1.aes-sha2'})
+  [PASS] 3b. m.room.retention present with window (ms)  (200 {'max_lifetime': 604800000})
+  [PASS] 4a. exactly one event pinned  (pinned=['$88_orkWXxd9QQqd6dZq2cYTXbMEDlPSV4wBR_UHTYKY'])
+  [PASS] 4b. pinned text mentions the configured window  (label='1w' body[:80]='📜 Retention policy — immutable at room creation\n\nRoom: standup\nPolicy window: 1w')
+  [PASS] 4c. pinned text is honest (states what it does NOT do)  (body[:120]='📜 Retention policy — immutable at room creation\n\nRoom: standup\nPolicy window: 1w (604800s)\n\nWhat this DOES: the bot (sol')
+  [PASS] 4d. pinned text equals bot policy_text for this window
+  [PASS] 5a. room is linked as a space child (m.space.child present)  (200 {'via': ['localhost:46167']})
+  [PASS] 5b. join_rule restricted to the space  ({'allow': [{'room_id': '!Hgt_27n7Da5nSdIi8GfdVLGwuS5Wz_GN1ewsj4Y_xsk', 'type': 'm.room_membership'}], 'join_rule': 'restricted'})
+  [PASS] 5c. space member joined retention room with NO invite  (status=200)
+  [PASS] 6a. elevated attacker to PL100 (simulated)  (status=200)
+  [PASS] 6b. attacker PUT of m.room.retention accepted by server  (status=200 body={'event_id': '$yNo7LcbvDExrnaSfiWcP-1u7w74X8yYobaeUKRXk-Qg'})
+  [PASS] 6c. room state DID change (proves the PUT landed)  (room_state={'max_lifetime': 86400000})
+  [PASS] 6d. bot in-force window UNCHANGED (immutable store)  (in_force_window=604800 in_force_ms=604800000)
+
+=== 21/21 pass ===
