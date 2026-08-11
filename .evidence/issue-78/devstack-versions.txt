@@ -1,0 +1,1 @@
+continuwuity versions: ['v1.16', 'v1.17', 'v1.18']

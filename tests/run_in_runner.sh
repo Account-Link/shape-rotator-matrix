@@ -87,6 +87,16 @@ DEV_HS="$HS" \
   ADMIN_MXID="$ADMIN_MXID" \
   python3 tests/admin_e2ee.py
 
+# Retention room factory (issue #78 / epic #76 chip 2): bot-created room with
+# bot sole PL100, E2EE, m.room.retention, restricted space join, a pinned
+# honest policy message, and an immutable in-force policy store. Import-based
+# (like history_bundle_e2e) — it self-provisions a bot + space, so it needs no
+# /shared env beyond DEV_HS + DEV_REG_TOKEN.
+echo "[runner] === retention_room_e2e.py ==="
+DEV_HS="$HS" \
+  DEV_REG_TOKEN="$CONDUWUIT_REGISTRATION_TOKEN" \
+  python3 tests/retention_room_e2e.py
+
 # Escrow durability (issue #60): runs the ACTUAL approver export/wipe/import
 # against a re-mint under a NEW device_id and proves the re-minted bot still
 # decrypts a pre-wipe message. Permanent regression gate — a future self-heal
