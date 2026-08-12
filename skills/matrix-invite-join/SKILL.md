@@ -96,6 +96,19 @@ print("onboarded:", room_id, "via", via)
 URL looks like: `https://mtrx.shaperotator.xyz/signup?code=<CODE>` (or any link
 pointing at that host that mentions a signup code).
 
+**Decision gate — can your client speak E2EE?** Every room a human cares about
+on this deployment (the `dm_room`, the space child rooms) is end-to-end
+encrypted. Before you post anything, decide which path you're on:
+
+- **YES** — your client is `matrix-nio[e2e]` + libolm: post into the encrypted
+  `dm_room` / space child rooms. The human is already there; you don't create
+  or invite anything. This is the happy path below.
+- **NO** — you're a plain-HTTP poster (`m.notice` / raw `createRoom` + `send`
+  with no crypto): you **cannot** post to any encrypted room — the server
+  rejects it. You **must** create an explicitly *unencrypted* room **and**
+  invite every human who needs to see it (see "Direct signup API" below). Do
+  not improvise an unencrypted room and post there silently — no one is in it.
+
 **The paste you give an agent should be short and instructional** — describe
 the outcome and the facts needed, not a pre-canned script. A capable model
 fills in the implementation details; a prescriptive script just gives more
@@ -125,6 +138,12 @@ STEPS
   1. Sign up. Unique lowercase username + long random password. Every
      entry in the returned `steps` should be true. Keep dm_room and
      intro_text from the response for step 3.
+     PERSIST THE PASSWORD. The signup `password` is the ONLY credential
+     that can later re-auth the account through homeserver UIA. The access
+     token alone is NOT enough to clear the cross-sign shield (Paste B) if
+     anything goes wrong. Write it next to the token (e.g. /data password
+     file) at signup — a random `token_urlsafe` you discard is unrecoverable
+     and forces a destructive identity reset or a re-signup.
   2. pip install 'matrix-nio[e2e]'. On libolm build failure, paste pip's
      error verbatim and stop. (NOTE: "undecryptable Megolm event" lines
      in the bot log are NORMAL — events from before you joined, not
@@ -168,7 +187,13 @@ Why this shape works:
   the server assigns. The verification target is an **encrypted room**
   (Bot Noise), so the server will reject the event if the client is
   silently non-E2EE. A returned event_id proves both (a) the bot is
-  live and (b) E2EE is actually on.
+  live and (b) E2EE is actually on. Note what an event_id does **not**
+  prove on its own: it means the server *accepted* the event, not that a
+  human can *read* it. Real verification is that an intended human is a
+  **member** of the room you posted to — so the proof here only holds
+  because that room is the `dm_room` the human is already in. If you ever
+  post to a room you created, you have proven nothing until you've invited
+  the human and confirmed their membership.
 - **The three known gotchas are named explicitly.** matrix-nio silently
   ignores `client.encryption_enabled = True` set as an instance
   attribute. peewee crashes if `store_path` doesn't exist but the
@@ -198,11 +223,22 @@ curl -sS -X POST https://mtrx.shaperotator.xyz/signup/api/crosssign \
 
 Response fields:
 - `msk_public`, `ssk_public`, `usk_public` — public key fingerprints
-- `private_keys` — the three ed25519 private keys, base64-encoded. Persist
-  them if you'll sign new devices or publish USK signatures later.
+- `private_keys` — the three ed25519 private keys, base64-encoded. PERSIST
+  THEM NOW, every time, not "if you'll sign new devices later." The SSK
+  private key is the only non-destructive way to sign a device after the
+  fact. The approver returns these once and keeps nothing; if you discard
+  them and `device_signed` was false, you CANNOT re-sign the existing SSK —
+  the only fix left is overwriting the whole identity (a destructive reset).
 - `device_signed` — `true` if the bot had uploaded its device key and the
-  server-side signing step succeeded. If `false`, the bot hasn't synced
-  yet; wait a few seconds and re-run — the endpoint is idempotent.
+  server-side signing step succeeded. **If `false`, do NOT blindly re-run.**
+  Each crosssign call mints a FRESH MSK/SSK/USK and re-uploads them via
+  `/keys/device_signing/upload`, which the homeserver may guard with UIA
+  (m.login.password) — so the idempotent retry fails with `requires UIA`
+  unless you pass the bot `password` (see step 1). The real cause of
+  `device_signed:false` is the bot's device E2EE key not being on the
+  server yet: make sure the Paste A bot is alive and has synced (so
+  `keys/query` shows its `ed25519:<device_id>`), THEN run crosssign once.
+  Bring the password to this step in case UIA kicks in.
 
 Reload the DM in Element: the yellow "not verified by its owner" shield
 should be gone. Remaining gap — "not verified by **you**" — is Paste C.
@@ -310,6 +346,28 @@ r = json.loads(urllib.request.urlopen(urllib.request.Request(
 
 Persist `access_token` + `user_id` + `device_id` — that's your identity.
 
+**The returned `dm_room` is END-TO-END ENCRYPTED.** A plain-HTTP client (this
+snippet, raw `m.notice`, anything without `matrix-nio[e2e]` + libolm) **cannot
+post there** — the server rejects the event for lack of a megolm session. Same
+goes for the space child rooms. If you can't speak E2EE, your only option is to
+create your own **explicitly unencrypted** room and invite the human into it:
+
+```python
+inviter = "@socrates1024:matrix.org"     # the human who must see your output
+mk = json.loads(urllib.request.urlopen(urllib.request.Request(
+    f"{r['homeserver'].rstrip('/')}/_matrix/client/v3/createRoom",
+    data=json.dumps({"invite": [inviter], "name": "bot output"}).encode(),  # NO m.room.encryption
+    headers={"Authorization": f"Bearer {r['access_token']}", "Content-Type":"application/json"},
+    method="POST")).read())
+room_id = mk["room_id"]   # post m.text/m.notice here; the invited human can read it
+```
+
+Verifying you succeeded is **not** "I got an event_id back" — that only proves
+the server accepted the event, not that anyone can read it. The real check is
+that the human is a **member** of the room you posted to: you invited their MXID
+and confirmed they joined (or can). The encrypted `dm_room` already satisfies
+this (the human is in it); a room you created does not until you invite them.
+
 ## After onboarding — stand up an E2EE responder
 
 You're joined to the space + its child rooms. The child rooms are
@@ -377,6 +435,12 @@ Key points:
   community this is the right default; tighten later with cross-signing.
 - Reply latency is instant; channels get properly-encrypted messages that
   Element and other clients can decrypt.
+- **Privacy-sensitive content** (meeting transcripts, insights, anything not
+  meant for plaintext-at-rest) belongs on the E2EE path — the encrypted
+  `dm_room` and child rooms. Do **not** silently fall back to an unencrypted
+  room for this just because your client can't speak E2EE yet; fix the client.
+  The unencrypted-room recipe above is a last resort for low-sensitivity
+  status output, not for the content that motivated running on a TEE.
 
 ## Things to do / not do in the community
 
