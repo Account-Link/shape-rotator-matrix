@@ -40,7 +40,8 @@ class _SASSession:
     """State machine for one verification transaction."""
 
     def __init__(self, txn_id: str, their_user: str, their_device: str,
-                 our_user: str, our_device: str, client, crypto_store):
+                 our_user: str, our_device: str, client, crypto_store,
+                 room_id: str | None = None):
         import olm
         self.txn_id = txn_id
         self.their_user = their_user
@@ -49,12 +50,18 @@ class _SASSession:
         self.our_device = our_device
         self._client = client
         self._store = crypto_store
+        self._room_id = room_id
         self._sas = olm.Sas()
         self._start_event: dict | None = None
         self._cancelled = False
 
     async def _send(self, event_type: str, content: dict):
         from mautrix.types import EventType
+        if self._room_id:
+            room_content = {**content, "msgtype": event_type}
+            await self._client.send_message_event(
+                self._room_id, EventType.ROOM_MESSAGE, room_content)
+            return
         et = EventType.find(event_type, EventType.Class.TO_DEVICE)
         await self._client.send_to_device(
             et, {self.their_user: {self.their_device: content}})
@@ -188,7 +195,7 @@ class _SASSession:
 
 
 class SASVerificationManager:
-    """Handles all incoming verification to-device events."""
+    """Handles incoming to-device and in-room verification events."""
 
     def __init__(self, client, crypto_store, our_user: str, our_device: str):
         self._client = client
@@ -209,7 +216,8 @@ class SASVerificationManager:
             et = EventType.find(ev_type_str, EventType.Class.TO_DEVICE)
             client.add_event_handler(et, handler)
 
-    def _get_or_create(self, content: dict, sender: str) -> _SASSession | None:
+    def _get_or_create(self, content: dict, sender: str,
+                       room_id: str | None = None) -> _SASSession | None:
         txn_id = content.get("transaction_id")
         if not txn_id:
             return None
@@ -218,7 +226,7 @@ class SASVerificationManager:
             self._sessions[txn_id] = _SASSession(
                 txn_id, sender, their_device,
                 self._our_user, self._our_device,
-                self._client, self._store,
+                self._client, self._store, room_id=room_id,
             )
         return self._sessions[txn_id]
 
@@ -229,17 +237,19 @@ class SASVerificationManager:
             c = c.serialize()
         return c
 
-    async def _on_request(self, event):
+    async def _on_request(self, event, in_room=False):
         content = self._as_dict(event)
         sender = event.sender if hasattr(event, "sender") else event.get("sender", "")
-        sess = self._get_or_create(content, sender)
+        room_id = getattr(event, "room_id", None) if in_room else None
+        sess = self._get_or_create(content, sender, room_id=room_id)
         if sess:
             await sess.handle_request(content)
 
-    async def _on_start(self, event):
+    async def _on_start(self, event, in_room=False):
         content = self._as_dict(event)
         sender = event.sender if hasattr(event, "sender") else event.get("sender", "")
-        sess = self._get_or_create(content, sender)
+        room_id = getattr(event, "room_id", None) if in_room else None
+        sess = self._get_or_create(content, sender, room_id=room_id)
         if sess:
             await sess.handle_start(content)
 
@@ -261,3 +271,23 @@ class SASVerificationManager:
         txn_id = content.get("transaction_id")
         if txn_id:
             self._sessions.pop(txn_id, None)
+
+    async def handle_room_message(self, event) -> bool:
+        """Dispatch an in-room m.key.verification.* message.
+
+        Element sends these as ordinary m.room.message events. Returning a
+        boolean lets the responder keep command dispatch separate from SAS.
+        """
+        content = self._as_dict(event)
+        event_type = content.get("msgtype")
+        handler = {
+            "m.key.verification.request": self._on_request,
+            "m.key.verification.start": self._on_start,
+            "m.key.verification.key": self._on_key,
+            "m.key.verification.mac": self._on_mac,
+            "m.key.verification.cancel": self._on_cancel,
+        }.get(event_type)
+        if not handler:
+            return False
+        await handler(event, in_room=True)
+        return True

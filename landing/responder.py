@@ -39,6 +39,11 @@ from mautrix.util.async_db import Database
 
 from sas_verification import SASVerificationManager
 
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(name)s: %(message)s",
+)
+
 HS      = os.environ["HS"].rstrip("/")
 MXID    = os.environ["MXID"]
 TOKEN   = os.environ["TOKEN"]
@@ -218,11 +223,13 @@ async def main():
     client, cs, ss = await make_client()
     await client.crypto.share_keys()
     print(f"responder up as {MXID} device={DEVICE} ident={client.crypto.account.identity_key[:12]}...", flush=True)
-    SASVerificationManager(client, cs, MXID, DEVICE)
+    sas_manager = SASVerificationManager(client, cs, MXID, DEVICE)
     register_room_key_bundle_handler(client, cs, ss)
 
     async def on_msg(evt):
         if evt.sender == MXID:
+            return
+        if await sas_manager.handle_room_message(evt):
             return
         body = (getattr(evt.content, "body", "") or "").strip()
         cmd = body.split()[0] if body else ""
@@ -239,7 +246,7 @@ async def main():
     if DM_ROOM and INTRO:
         content = TextMessageEventContent(msgtype=MessageType.TEXT, body=INTRO)
         resp = await client.send_message_event(DM_ROOM, EventType.ROOM_MESSAGE, content)
-        print(f"POSTED:{resp.event_id}", flush=True)
+        print(f"POSTED:{resp}", flush=True)
 
     while True:
         try:
