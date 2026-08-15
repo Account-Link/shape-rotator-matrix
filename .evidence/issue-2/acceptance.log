@@ -1,0 +1,38 @@
+
+===== pre-flight =====
+[accept] repo:        /tmp/mx-2
+[accept] fixtures:    /home/amiller/.teleport-travel/test-fixtures.json
+[accept] creds:       /home/amiller/.shape-bridge-bot/creds.json
+[accept] state:       /home/amiller/.teleport-travel/relay-state.json
+[accept] full log:    /tmp/mx-2/.acceptance-logs/full.log  (mautrix stderr captured here; shown on failure)
+[accept] telegram api id: 20704355
+
+===== build runner image (tests/Dockerfile: libolm + mautrix) =====
+
+===== build acceptance image (runner + telethon + python-dotenv) =====
+[accept] PASS: images built
+
+===== baseline: relay --once (advance cursors to now) =====
+[accept] state before: {"tg_last_id": 23, "mx_seen": ["$U9tgD6nHM07WOiIkw6CT6CnJMn6egOphyAJs3QYEjIE", "$BXK8bzNp_hL1f75oEThkeUdfdPTrnFCXhrbCwbqt1k0", "$J52hG3WTV5wtZ5En7HpxpJftRjxotSdbho7gi3-yiGo", "$VwdLErI6wKv5gTxRUT5VG6SPoleSoNlC_YFytrpwoRU", "$XN6i2OV7FjN-glhbVWl3GZP766KBupekSjHIBlDCnnA", "$UpwJ6A9tRtCW6-8mTKxU0WL4aCoszYulwGvgYoV5Z94", "$V5rfbd1K3POaUFNGL8qubiV84qDjOvlZ8zgKUASNYc8", "$oel2yrKe9_OyWWseCtQUa6wr3vJc_ylW5R2SX9OkL1s", "$xAqdCxiMuCMMhPKCA3o9ryQkn3ES5--xljuw8RGP1fE", "$YOBhKQMifPxjVn40IUmLOnjQzhYmEEavKT1pMt7zDWE", "$QQwArqyEk4QxbxSFaMD6DJYYMrIPcpa1bvIVPgLbNNk", "$XQzIFo1dIwQMNmOonySXvvEagqtQVsx9PfeIwL-ft4o", "$f_N0vpN4WhApbn8aTm4mI2q5QPuTpObODEFqdHzuMdo", "$LJTLvYPocuZetkA_OZSLyKbhYxZOmvZO8HsLH9KPaDg", "$9YlliWSumfJfutbue4kH4mjwRSfReWrxPHQF_9Nqo4U", "$fVyocenBRBRGBOtWM84nJYKi9mD0a03Y_p9x9tcmQaM", "$QSVWW8baA02HJx7T7tQhmYjeZJW5J6tfRvmscohVDc0"]}
+[accept] state after:  {"tg_last_id": 23, "mx_seen": ["$U9tgD6nHM07WOiIkw6CT6CnJMn6egOphyAJs3QYEjIE", "$BXK8bzNp_hL1f75oEThkeUdfdPTrnFCXhrbCwbqt1k0", "$J52hG3WTV5wtZ5En7HpxpJftRjxotSdbho7gi3-yiGo", "$VwdLErI6wKv5gTxRUT5VG6SPoleSoNlC_YFytrpwoRU", "$XN6i2OV7FjN-glhbVWl3GZP766KBupekSjHIBlDCnnA", "$UpwJ6A9tRtCW6-8mTKxU0WL4aCoszYulwGvgYoV5Z94", "$V5rfbd1K3POaUFNGL8qubiV84qDjOvlZ8zgKUASNYc8", "$oel2yrKe9_OyWWseCtQUa6wr3vJc_ylW5R2SX9OkL1s", "$xAqdCxiMuCMMhPKCA3o9ryQkn3ES5--xljuw8RGP1fE", "$YOBhKQMifPxjVn40IUmLOnjQzhYmEEavKT1pMt7zDWE", "$QQwArqyEk4QxbxSFaMD6DJYYMrIPcpa1bvIVPgLbNNk", "$XQzIFo1dIwQMNmOonySXvvEagqtQVsx9PfeIwL-ft4o", "$f_N0vpN4WhApbn8aTm4mI2q5QPuTpObODEFqdHzuMdo", "$LJTLvYPocuZetkA_OZSLyKbhYxZOmvZO8HsLH9KPaDg", "$9YlliWSumfJfutbue4kH4mjwRSfReWrxPHQF_9Nqo4U", "$fVyocenBRBRGBOtWM84nJYKi9mD0a03Y_p9x9tcmQaM", "$QSVWW8baA02HJx7T7tQhmYjeZJW5J6tfRvmscohVDc0"]}
+[accept] PASS: baseline --once completed within 60s
+
+===== CHECK 1: TG -> MX (relay polls+handles a TG-side message in <10s) =====
+[accept] sent TG id=24 token=ACPT-TG2MX-1786834219-1939417262
+[accept] PASS: TG->MX: relay noticed+suppressed id=24 in 5s, cursor=24, no MX leak
+
+===== CHECK 2: MX -> TG (relay polls+handles a MX-side message in <10s) =====
+[accept] sent MX event_id=$0k5CPl3kwkpEVPv3ChKZHKlpQXRaPtLovWbxQ53OrxA token=ACPT-MX2TG-1786834219-1939417262
+[accept] PASS: MX->TG: relay noticed+suppressed $0k5CPl3kwkpEVPv3ChKZHKlpQXRaPtLovWbxQ53OrxA in 3s, marked seen, no TG leak
+
+===== CHECK 3: restart catch-up, exactly-once each direction =====
+[accept] downtime sends: TG id=25  MX event=$KjyCvOmEhnXdDpW3MdCcOqsmNEWe7UliUffVCf63dfQ
+[accept] PASS: restart #1 caught up both (TG id=25, MX $KjyCvOmEhnXdDpW3MdCcOqsmNEWe7UliUffVCf63dfQ)
+[accept] PASS: restart #2 re-processed neither (exactly-once confirmed; cursors stable)
+
+===== transcript summary =====
+[accept] tokens used: 1786834219-1939417262
+[accept] final relay state: {"tg_last_id": 25, "mx_seen": ["$U9tgD6nHM07WOiIkw6CT6CnJMn6egOphyAJs3QYEjIE", "$BXK8bzNp_hL1f75oEThkeUdfdPTrnFCXhrbCwbqt1k0", "$J52hG3WTV5wtZ5En7HpxpJftRjxotSdbho7gi3-yiGo", "$VwdLErI6wKv5gTxRUT5VG6SPoleSoNlC_YFytrpwoRU", "$XN6i2OV7FjN-glhbVWl3GZP766KBupekSjHIBlDCnnA", "$UpwJ6A9tRtCW6-8mTKxU0WL4aCoszYulwGvgYoV5Z94", "$V5rfbd1K3POaUFNGL8qubiV84qDjOvlZ8zgKUASNYc8", "$oel2yrKe9_OyWWseCtQUa6wr3vJc_ylW5R2SX9OkL1s", "$xAqdCxiMuCMMhPKCA3o9ryQkn3ES5--xljuw8RGP1fE", "$YOBhKQMifPxjVn40IUmLOnjQzhYmEEavKT1pMt7zDWE", "$QQwArqyEk4QxbxSFaMD6DJYYMrIPcpa1bvIVPgLbNNk", "$XQzIFo1dIwQMNmOonySXvvEagqtQVsx9PfeIwL-ft4o", "$f_N0vpN4WhApbn8aTm4mI2q5QPuTpObODEFqdHzuMdo", "$LJTLvYPocuZetkA_OZSLyKbhYxZOmvZO8HsLH9KPaDg", "$9YlliWSumfJfutbue4kH4mjwRSfReWrxPHQF_9Nqo4U", "$fVyocenBRBRGBOtWM84nJYKi9mD0a03Y_p9x9tcmQaM", "$QSVWW8baA02HJx7T7tQhmYjeZJW5J6tfRvmscohVDc0", "$0k5CPl3kwkpEVPv3ChKZHKlpQXRaPtLovWbxQ53OrxA", "$KjyCvOmEhnXdDpW3MdCcOqsmNEWe7UliUffVCf63dfQ"]}
+[accept] all three checks passed
+[accept] ACCEPTANCE PASSED (6 assertions)
+[accept] full transcript (incl. mautrix stderr): /tmp/mx-2/.acceptance-logs/full.log
