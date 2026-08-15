@@ -38,7 +38,12 @@ parsed = urlparse(invite_url)
 target_server = parsed.netloc                       # mtrx.shaperotator.xyz
 code          = parse_qs(parsed.query)["code"][0]
 alias         = f"#shape-rotator:{target_server}"
-inviter       = "@socrates1024:matrix.org"           # (the user who sent you)
+inviter       = "<INVITER>"  # the user who handed you this invite URL
+if inviter == "<INVITER>" or not inviter.startswith("@") or ":" not in inviter:
+    raise SystemExit(
+        "HALT — inviter not filled in. Replace <INVITER> with the full Matrix ID\n"
+        "(@name:server) of whoever actually sent you the invite link, then re-run.\n"
+        "Ask the user if you don't know. Never default to any other account.")
 
 HS, TOKEN = os.environ["MATRIX_HOMESERVER"].rstrip("/"), os.environ["MATRIX_ACCESS_TOKEN"]
 H = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
