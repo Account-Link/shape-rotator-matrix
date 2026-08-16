@@ -1799,11 +1799,116 @@ async def cmd_retention_room(client, room_id, sender, args):
             f"space-child of {SPACE_ID}")
 
 
+def _parse_admin_target(args, command):
+    parts = args.split(maxsplit=1)
+    if not parts or not parts[0].startswith("@") or ":" not in parts[0]:
+        return None, f"usage: {command} <@user:server> [reason]"
+    return parts[0], (parts[1].strip() if len(parts) > 1 else "admin command")
+
+
+async def _membership_action(client, action, user_id, reason="admin command"):
+    try:
+        await client.api.request(
+            "POST",
+            f"/_matrix/client/v3/rooms/{urllib.parse.quote(SPACE_ID, safe='')}/{action}",
+            content={"user_id": user_id, "reason": reason},
+        )
+    except Exception as e:
+        status = getattr(e, "http_status", None)
+        detail = str(e)[:200]
+        return False, f"{status}: {detail}" if status else detail
+    return True, "ok"
+
+
+async def cmd_kick(client, room_id, sender, args):
+    user_id, reason = _parse_admin_target(args, "!kick")
+    if not user_id:
+        return reason
+    if user_id == OUR_MXID:
+        return "refused: I will not kick myself"
+    ok, detail = await _membership_action(client, "kick", user_id, reason)
+    audit({"type": "admin_kick", "target": user_id, "reason": reason,
+           "requested_by": sender, "ok": ok, "detail": detail})
+    return f"kicked {user_id} from the space" if ok else f"!kick failed: {detail}"
+
+
+async def cmd_ban(client, room_id, sender, args):
+    user_id, reason = _parse_admin_target(args, "!ban")
+    if not user_id:
+        return reason
+    if user_id == OUR_MXID:
+        return "refused: I will not ban myself"
+    ok, detail = await _membership_action(client, "ban", user_id, reason)
+    audit({"type": "admin_ban", "target": user_id, "reason": reason,
+           "requested_by": sender, "ok": ok, "detail": detail})
+    return f"banned {user_id} from the space" if ok else f"!ban failed: {detail}"
+
+
+async def cmd_unban(client, room_id, sender, args):
+    user_id, reason = _parse_admin_target(args, "!unban")
+    if not user_id:
+        return reason
+    ok, detail = await _membership_action(client, "unban", user_id, reason)
+    audit({"type": "admin_unban", "target": user_id, "reason": reason,
+           "requested_by": sender, "ok": ok, "detail": detail})
+    return f"unbanned {user_id} from the space" if ok else f"!unban failed: {detail}"
+
+
+def _stats_last_24h():
+    cutoff = time.time() - 24 * 60 * 60
+    counts = {"knocks": 0, "promoted": 0, "rejected": 0}
+    keywords = {}
+    try:
+        lines = LOG_PATH.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        try:
+            event_ts = float(event.get("ts", 0))
+        except (TypeError, ValueError):
+            continue
+        if event_ts < cutoff:
+            continue
+        kind = event.get("type")
+        if kind in ("vetting_room_created", "knock_rejected"):
+            counts["knocks"] += 1
+        if kind in ("promoted", "lobby_promoted"):
+            counts["promoted"] += 1
+        if kind in ("knock_rejected", "vetting_failed", "vetting_timeout",
+                    "lobby_rejected", "lobby_failed", "lobby_timeout"):
+            counts["rejected"] += 1
+        keyword = event.get("keyword")
+        if keyword and kind in ("vetting_room_created", "lobby_challenge_sent"):
+            keywords[keyword] = keywords.get(keyword, 0) + 1
+    pending = 0
+    for path in (VETTING_PATH, LOBBY_PATH):
+        state = _load(path)
+        pending += sum(1 for meta in state.values()
+                       if not meta.get("closed") and not meta.get("promoted"))
+    top = ", ".join(f"{word} ({n})" for word, n in
+                     sorted(keywords.items(), key=lambda item: (-item[1], item[0]))[:5])
+    return (f"last 24h: knocks={counts['knocks']}, promoted={counts['promoted']}, "
+            f"rejected={counts['rejected']}, pending={pending}\n"
+            f"top captcha keywords: {top or 'none'}")
+
+
+async def cmd_stats(client, room_id, sender, args):
+    return _stats_last_24h()
+
+
 COMMANDS = {
     "!mint": cmd_mint,
     "!codes": cmd_codes,
     "!revoke": cmd_revoke,
     "!retention-room": cmd_retention_room,
+    "!kick": cmd_kick,
+    "!ban": cmd_ban,
+    "!unban": cmd_unban,
+    "!stats": cmd_stats,
     "!help": None,  # filled below
 }
 
