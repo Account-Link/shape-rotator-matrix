@@ -127,6 +127,14 @@ jobs:
             --name "$CVM_NAME" -c docker-compose.staging.yml -e .staging.env \
             > deploy1.log 2>&1 || true
           cat deploy1.log
+          # Fail fast on a DEFINITIVE auth rejection — a 401 will never heal by
+          # polling. (First dispatch, run 31968806742, burned the whole 10-min
+          # poll on an instant `HTTP: 401 / Invalid API key` from a stale
+          # PHALA_API_KEY.) Every other failure mode keeps the slow-Phala poll.
+          if grep -qE 'HTTP: 40[13]|Invalid API key|Unauthorized' deploy1.log; then
+            echo "::error::phala rejected our credentials (401/403) — the PHALA_API_KEY secret is stale or invalid. Polling cannot fix this; refresh the secret and re-dispatch."
+            exit 1
+          fi
           status=
           for i in $(seq 1 60); do   # 60 * 10s = 10 min ceiling
             status=$(phala cvms list --search "$CVM_NAME" -j --api-token "$PHALA_CLOUD_API_KEY" \

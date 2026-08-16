@@ -55,3 +55,8 @@ watched dispatch, called out explicitly in the PR:
 - #3 broken-compose test → follow-up PR the operator pushes once the workflow is on `staging`.
 - #4 #13 slow-Phala → handled: the workflow polls JSON status for 10 min and fails loud at PR time
   if the CVM never reaches `running` (the staging analogue of #13's prod recovery).
+
+--- 2026-08-16 addendum (rework pass on PR #69) ---
+First dispatch (run 31968806742) failed: stale PHALA_API_KEY -> 401 at provision (06). Patched
+phase 1 to fail fast on definitive auth rejection; re-ran checks 01/02 equivalents on the patched
+file (07). Blocked on operator: fresh Phala API key in the PHALA_API_KEY secret, then one re-dispatch.
