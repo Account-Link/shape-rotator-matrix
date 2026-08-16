@@ -41,3 +41,11 @@ conclusion: FAILURE — intended outcome: definitive 401 on a stale credential
    (gh secret list); this box's only phala profile is likewise rejected (phala status →
    Invalid API key). The key is revoked Phala-side — no credential held on this box can
    perform the round-trip. Minting a new key is operator-only (Phala account identity).
+
+## Re-confirmation — run 31971800063 (pull_request, d468197, 2026-08-16T20:52:13Z)
+Deterministic re-run ~40 min later on the same stale secret: 27 s total, identical fast-fail
+(20:52:35.05Z ##[error]phala rejected our credentials...), "no orphaned staging CVMs",
+always() teardown fired, no CVM created, zero spend. Note: the pull_request paths filter is
+matched against the FULL PR diff (three-dot vs base), so every push to this PR re-triggers
+validation regardless of which files changed — intended per acceptance #2 ("on every
+deploy-relevant PR"), and free while the credential is stale (fails fast, nothing provisioned).
