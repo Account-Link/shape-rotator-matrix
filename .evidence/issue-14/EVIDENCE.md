@@ -60,3 +60,11 @@ watched dispatch, called out explicitly in the PR:
 First dispatch (run 31968806742) failed: stale PHALA_API_KEY -> 401 at provision (06). Patched
 phase 1 to fail fast on definitive auth rejection; re-ran checks 01/02 equivalents on the patched
 file (07). Blocked on operator: fresh Phala API key in the PHALA_API_KEY secret, then one re-dispatch.
+
+--- 2026-08-16 addendum 2 (rework pass 2 on PR #69) ---
+The patch's own push triggered run 31969904168 (pull_request event): the fast-fail fired live,
+1.2 s into phase 1, with the actionable error; orphan sweep + always() teardown both ran; no CVM
+created, zero spend (08). Fast-fail is now CI-observed, not just grep-tested. Credential still
+revoked Phala-side (repo secret unchanged since 2026-05-28; box profile rejected too) — every
+acceptance path (#2 round-trip, #3 broken-compose run) requires a key only the operator can mint.
+Still blocked; no ready-to-merge set.

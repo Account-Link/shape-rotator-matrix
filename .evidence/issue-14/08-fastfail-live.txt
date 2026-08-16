@@ -1,0 +1,43 @@
+# Run 31969904168 — live confirmation of the auth fast-fail (patch 2908f46)
+repo:      teleport-computer/shape-rotator-matrix
+workflow:  staging-validate.yml ("ephemeral staging validation")
+event:     pull_request (auto-triggered by the push of 2908f46 itself — the fast-fail patch)
+head:      ready-14 @ 2908f46
+created:   2026-08-16T20:13:05Z
+completed: 2026-08-16T20:13:29Z  (~24 s total)
+conclusion: FAILURE — intended outcome: definitive 401 on a stale credential
+
+## Pre-flight orphan sweep (runs before phase 1)
+20:13:24.86Z  no orphaned staging CVMs
+              → run 31968806742 left nothing stranded; the guaranteed-teardown design held.
+
+## Phase 1 — create ephemeral CVM, poll until running
+20:13:24.94Z  $ phala deploy --api-token *** --name staging-pr-31969904168 \
+                  -c docker-compose.staging.yml -e .staging.env > deploy1.log
+20:13:26.12Z  Provisioning CVM staging-pr-31969904168...
+20:13:26.12Z  CVM deployment failed.
+20:13:26.12Z  Message: Invalid API key
+20:13:26.12Z  Request: POST https://cloud-api.phala.com/api/v1/cvms/provision
+20:13:26.12Z  HTTP: 401 Unauthorized
+20:13:26.13Z  ##[error]phala rejected our credentials (401/403) — the PHALA_API_KEY secret is
+              stale or invalid. Polling cannot fix this; refresh the secret and re-dispatch.
+20:13:26.13Z  ##[error]Process completed with exit code 1.
+              → fast-fail fired 1.2 s into phase 1. Pre-patch behavior (run 31968806742) burned
+                the full 60×10 s = 10 min poll on the same instant 401.
+
+## Always-teardown (+ orphan sweep), `if: always()`
+20:13:26.15Z  ##[notice]tearing down staging-pr-31969904168
+20:13:27.74Z  Delete CVM failed. Message: Invalid API key
+20:13:27.74Z  Request: GET https://cloud-api.phala.com/api/v1/cvms/staging-pr-31969904168 → 401
+              → expected: no CVM was ever created, nothing exists to delete. The step still ran,
+                proving the always() teardown hook fires on the fast-fail exit path.
+
+## Facts established by this run
+1. The 2908f46 auth fast-fail is verified LIVE in CI — previously it was only grep-tested
+   against the captured 31968806742 log; now observed firing on a real runner.
+2. The pre-flight orphan sweep and the always() teardown both execute on the fast-fail path.
+3. No CVM was provisioned → zero Phala spend for this run.
+4. Credential state at run time: repo secret PHALA_API_KEY last updated 2026-05-28T15:02:46Z
+   (gh secret list); this box's only phala profile is likewise rejected (phala status →
+   Invalid API key). The key is revoked Phala-side — no credential held on this box can
+   perform the round-trip. Minting a new key is operator-only (Phala account identity).
