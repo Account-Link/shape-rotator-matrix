@@ -1,0 +1,11 @@
+# Live read-only anchor vs deployed staging homeserver — 2026-08-16 19:33:04Z
+# PR #68 head: e1f6c230986debc4fd0c36a25b4b833411c55f82  (branch ready-7)
+
+$ curl -sS -o - -w "\nHTTP %{http_code}\n" https://mtrx.shaperotator.xyz/_matrix/client/versions
+{"versions":["r0.0.1","r0.1.0","r0.2.0","r0.3.0","r0.4.0","r0.5.0","r0.6.0","r0.6.1","v1.1","v1.2","v1.3","v1.4","v1.5","v1.8","v1.11","v1.12","v1.13","v1.14"],"unstable_features":{"org.matrix.e2e_cross_signing":true,"org.matrix.msc2285.stable":true,"org.matrix.msc2836":true,"org.matrix.msc2946":true,"org.matrix.msc3026.busy_presence":true,"org.matrix.msc3814":true,"org.matrix.msc3827":true,"org.matrix.msc3916.stable":true,"org.matrix.msc3952_intentional_mentions":true,"org.matrix.msc4155":true,"org.matrix.msc4180":true,"org.matrix.simplified_msc3575":true,"uk.half-shot.msc2666.query_mutual_rooms":true,"uk.tcpip.msc4133":true,"uk.timedout.msc4323":true,"us.cloke.msc4175":true}}
+HTTP 200
+
+$ curl -sS -o - -w "\nHTTP %{http_code}\n" "https://mtrx.shaperotator.xyz/_matrix/client/v3/directory/room/%23shape-rotator%3Amtrx.shaperotator.xyz"
+{"room_id":"!4FL8uL5OEYLATG1VH4wC2CD3pfIV6BMFId9VT7rmm-g","servers":["gitter.im","matrix.org","mtrx.shaperotator.xyz","unredacted.org"]}
+HTTP 200
+

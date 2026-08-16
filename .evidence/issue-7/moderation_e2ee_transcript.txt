@@ -1,0 +1,128 @@
+ Container shape-rotator-e2e-continuwuity-1  Running
+ Container shape-rotator-e2e-bootstrap-1  Created
+ Container shape-rotator-e2e-knock-approver-1  Running
+ Container shape-rotator-e2e-landing-1  Running
+ Container shape-rotator-e2e-bootstrap-1  Starting
+ Container shape-rotator-e2e-bootstrap-1  Started
+ Container shape-rotator-e2e-bootstrap-1  Waiting
+ Container shape-rotator-e2e-bootstrap-1  Exited
+[driver] e2ee user: @mod_admin_1786908728_a954:localhost:46167 device=DRVa554
+  [PASS] A bumped to PL 50 in admin command room  (status=200)
+[driver] e2ee user: @mod_pleb_1786908728_4959:localhost:46167 device=DRV26c3
+[driver] victim user: @mod_victim_1786908729_395f:localhost:46167
+  [PASS] admin command room is E2EE for A
+Device @admin:localhost:46167/zUnOImd31Y isn't cross-signed
+Device @mod_admin_1786908728_a954:localhost:46167/DRVa554 isn't cross-signed
+Device @mod_pleb_1786908728_4959:localhost:46167/DRV26c3 isn't cross-signed
+Device @admin:localhost:46167/zUnOImd31Y isn't cross-signed
+Didn't find cross-signing key master of @admin:localhost:46167
+Device @mod_pleb_1786908728_4959:localhost:46167/DRV26c3 isn't cross-signed
+Didn't find cross-signing key master of @mod_pleb_1786908728_4959:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!stats' as $Zj2SUQxqZayv8WllWmhJHQY3AkKUvHtJIQlThrnn6_w
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: 'last 24h: knocks=0, promoted=0, rejected=0, pending=0\ntop captcha keywords: none'
+  [PASS] !stats (A) returns report (knocks/promoted/rejected/pending + keywords)  (reply='last 24h: knocks=0, promoted=0, rejected=0, pending=0\ntop captcha keywords: none')
+Device @mod_admin_1786908728_a954:localhost:46167/DRVa554 isn't cross-signed
+Device @admin:localhost:46167/zUnOImd31Y isn't cross-signed
+Device @mod_admin_1786908728_a954:localhost:46167/DRVa554 isn't cross-signed
+Didn't find cross-signing key master of @mod_admin_1786908728_a954:localhost:46167
+[driver] @mod_pleb_1786908728_4959:localhost:46167 received from @mod_admin_1786908728_a954:localhost:46167: '!stats'
+Device @admin:localhost:46167/zUnOImd31Y isn't cross-signed
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_pleb_1786908728_4959:localhost:46167 received from @admin:localhost:46167: 'last 24h: knocks=0, promoted=0, rejected=0, pending=0\ntop captcha keywords: none'
+  [PASS] N decrypted live bot traffic in the room (pre-send device discovery)  (inbox=[('@mod_admin_1786908728_a954:localhost:46167', '!stats'), ('@admin:localhost:46167', 'last 24h: knocks=0, promoted=0, rejected')])
+Didn't find cross-signing key master of @admin:localhost:46167
+Didn't find cross-signing key master of @mod_admin_1786908728_a954:localhost:46167
+Device @admin:localhost:46167/zUnOImd31Y isn't cross-signed
+Device @mod_admin_1786908728_a954:localhost:46167/DRVa554 isn't cross-signed
+Device @mod_pleb_1786908728_4959:localhost:46167/DRV26c3 isn't cross-signed
+[driver] @mod_pleb_1786908728_4959:localhost:46167 sent (encrypted) '!stats' as $7bLGMSLM3k7E2Pcm91af_ctFpsQk22On8KkCMLdejpA
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_pleb_1786908728_4959:localhost:46167 received from @admin:localhost:46167: '@mod_pleb_1786908728_4959:localhost:46167: refused — need PL >= 50 or be on the allowlist'
+  [PASS] PL gate: non-admin refused  (reply='@mod_pleb_1786908728_4959:localhost:46167: refused — need PL >= 50 or be on the allowlist'; inbox=[('@mod_admin_1786908728_a954:localhost:46167', '!stats'), ('@admin:localhost:46167', 'last 24h: knocks=0, promoted=0, rejected'), ('@admin:localhost:46167', '@mod_pleb_1786908728_4959:localhost:4616')])
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!kick' as $czP5cskZV0DC6V6gpT8EIbpFxDV_g-8EuKwerapUd9E
+Didn't find cross-signing key master of @mod_pleb_1786908728_4959:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @mod_pleb_1786908728_4959:localhost:46167: '!stats'
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: '@mod_pleb_1786908728_4959:localhost:46167: refused — need PL >= 50 or be on the allowlist'
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: 'usage: !kick <@user:server> [reason]'
+  [PASS] usage guard: bare !kick answered with usage  (reply='usage: !kick <@user:server> [reason]')
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!kick @admin:localhost:46167' as $DxAuu9YCcDdgzuplY1CuA7mKKHSRH77h4tJEv1mUmMk
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: 'refused: I will not kick myself'
+  [PASS] self-guard: bot refuses !kick of itself  (reply='refused: I will not kick myself')
+  [PASS] victim joined the space (pre-state)  (membership=join)
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!kick @mod_victim_1786908729_395f:localhost:46167 evidence-driver kick test' as $j4GFNpNZtZQb5vdAYuzbOmBI7Z8qEcTGhxbUeTTaYL8
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: 'kicked @mod_victim_1786908729_395f:localhost:46167 from the space'
+  [PASS] !kick removes a member (bot reply)  (reply='kicked @mod_victim_1786908729_395f:localhost:46167 from the space')
+  [PASS] !kick verified over client-server API  (membership=leave)
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!ban @mod_victim_1786908729_395f:localhost:46167 evidence-driver ban test' as $y0vJVwSsf5P_rH9IsSyG2USNyYigjhbL8YJ6UXOW8U8
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: 'banned @mod_victim_1786908729_395f:localhost:46167 from the space'
+  [PASS] !ban bans the user (bot reply)  (reply='banned @mod_victim_1786908729_395f:localhost:46167 from the space')
+  [PASS] !ban verified over client-server API  (membership=ban)
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!unban @mod_victim_1786908729_395f:localhost:46167 evidence-driver unban test' as $lDXj575Hbj7UwwQgIrGY9ZGy5jyupO9vD6qRwdSYwZM
+Didn't find cross-signing key master of @admin:localhost:46167
+[driver] @mod_admin_1786908728_a954:localhost:46167 received from @admin:localhost:46167: 'unbanned @mod_victim_1786908729_395f:localhost:46167 from the space'
+  [PASS] !unban lifts the ban (bot reply)  (reply='unbanned @mod_victim_1786908729_395f:localhost:46167 from the space')
+  [PASS] !unban verified over client-server API  (membership=leave)
+[driver] @mod_admin_1786908728_a954:localhost:46167 sent (encrypted) '!stats' as $iue3wUlX4dc8CT4GIU4iUcIaivdd1OE2dYoaxJ8SeU0
+  [PASS] !stats still well-formed after moderation traffic  (reply='last 24h: knocks=0, promoted=0, rejected=0, pending=0\ntop captcha keywords: none')
+Failed to run handler
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/mautrix/client/syncer.py", line 265, in _catch_errors
+    await handler(data)
+  File "/usr/local/lib/python3.11/site-packages/mautrix/client/encryption_manager.py", line 182, in handle
+    decrypted = await self.client.crypto.decrypt_megolm_event(evt)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/mautrix/crypto/decrypt_megolm.py", line 60, in decrypt_megolm_event
+    if not await self.crypto_store.validate_message_index(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/mautrix/crypto/store/asyncpg/store.py", line 496, in validate_message_index
+    row = await self.db.fetchrow(
+          ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/mautrix/util/async_db/database.py", line 176, in fetchrow
+    async with self.acquire() as conn:
+  File "/usr/local/lib/python3.11/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/mautrix/util/async_db/database.py", line 146, in acquire
+    async with self.acquire_direct() as conn:
+  File "/usr/local/lib/python3.11/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/mautrix/util/async_db/aiosqlite.py", line 202, in _acquire
+    raise RuntimeError("database pool has been stopped")
+RuntimeError: database pool has been stopped
+
+=== 15/15 pass ===
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x7f5cc153f590>
+Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x7f5cc154db50>, 30907441.32129123), (<aiohttp.client_proto.ResponseHandler object at 0x7f5cc153b850>, 30907443.32501247)])']
+connector: <aiohttp.connector.TCPConnector object at 0x7f5cc153c4d0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x7f5cc152d6d0>
+Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x7f5cc1538b50>, 30907453.453787517)])']
+connector: <aiohttp.connector.TCPConnector object at 0x7f5cc152e7d0>
+DRIVER_EXIT=0
+
+=== knock-approver container log, [admin] dispatch/reply lines (bot-side view) ===
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !stats from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'last 24h: knocks=0, promoted=0, rejected=0, pending=0\ntop captcha keywords: none'
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !stats from @mod_pleb_1786908728_4959:localhost:46167 is_admin=False
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !kick from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'usage: !kick <@user:server> [reason]'
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !kick from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'refused: I will not kick myself'
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !kick from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'kicked @mod_victim_1786908729_395f:localhost:46167 from the space'
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !ban from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'banned @mod_victim_1786908729_395f:localhost:46167 from the space'
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !unban from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'unbanned @mod_victim_1786908729_395f:localhost:46167 from the space'
+shape-rotator-e2e-knock-approver-1  | [admin] dispatch !stats from @mod_admin_1786908728_a954:localhost:46167 is_admin=True
+shape-rotator-e2e-knock-approver-1  | [admin] sending reply: 'last 24h: knocks=0, promoted=0, rejected=0, pending=0\ntop captcha keywords: none'
