@@ -1,0 +1,198 @@
+time="2026-08-17T17:33:27-05:00" level=warning msg="The \"CONDUWUIT_BOOTSTRAP_TOKEN\" variable is not set. Defaulting to a blank string."
+ Container rw70e2e-continuwuity-1  Running
+ Container rw70e2e-bootstrap-1  Created
+ Container rw70e2e-knock-approver-1  Running
+ Container rw70e2e-landing-1  Running
+ Container rw70e2e-bootstrap-1  Starting
+ Container rw70e2e-bootstrap-1  Started
+ Container rw70e2e-bootstrap-1  Waiting
+ Container rw70e2e-bootstrap-1  Exited
+[flow] operator: @op70_ca2e85:localhost:46167 device=OP707e1a
+  [PASS] admin invited @op70_ca2e85:localhost:46167 to admin room  (status=200)
+  [PASS] @op70_ca2e85:localhost:46167 joined admin room  (status=200)
+Failed to decrypt $GOInLALiVIg58XFi_aMWMb3-FdBnHuxZ3OQppMeYLqM: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $oOFjZJx-LR97e4DsmB9xjW2irjpwb01lpKSHQjZSqcA: Failed to decrypt megolm event: no session with given ID 7VKc6vUiEB5EV2ELA/4jdOY/OxuvNkUwJe4BBF1vBn0 found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $GOInLALiVIg58XFi_aMWMb3-FdBnHuxZ3OQppMeYLqM: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+  [PASS] admin room reports encrypted
+  [PASS] cleartext !mint sent over HTTP (no encryption)  (status=200)
+Failed to decrypt $oOFjZJx-LR97e4DsmB9xjW2irjpwb01lpKSHQjZSqcA: Failed to decrypt megolm event: no session with given ID 7VKc6vUiEB5EV2ELA/4jdOY/OxuvNkUwJe4BBF1vBn0 found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $GOInLALiVIg58XFi_aMWMb3-FdBnHuxZ3OQppMeYLqM: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $oOFjZJx-LR97e4DsmB9xjW2irjpwb01lpKSHQjZSqcA: Failed to decrypt megolm event: no session with given ID 7VKc6vUiEB5EV2ELA/4jdOY/OxuvNkUwJe4BBF1vBn0 found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $GOInLALiVIg58XFi_aMWMb3-FdBnHuxZ3OQppMeYLqM: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $oOFjZJx-LR97e4DsmB9xjW2irjpwb01lpKSHQjZSqcA: Failed to decrypt megolm event: no session with given ID 7VKc6vUiEB5EV2ELA/4jdOY/OxuvNkUwJe4BBF1vBn0 found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $GOInLALiVIg58XFi_aMWMb3-FdBnHuxZ3OQppMeYLqM: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $oOFjZJx-LR97e4DsmB9xjW2irjpwb01lpKSHQjZSqcA: Failed to decrypt megolm event: no session with given ID 7VKc6vUiEB5EV2ELA/4jdOY/OxuvNkUwJe4BBF1vBn0 found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Device @admin:localhost:46167/IBPl5CVC0s isn't cross-signed
+Device @admin:localhost:46167/IBPl5CVC0s isn't cross-signed
+Didn't find cross-signing key master of @admin:localhost:46167
+    recv @admin:localhost:46167: '@op70_ca2e85:localhost:46167: refused — admin commands require a cross-signing-verified device'
+  [PASS] cleartext !mint refused  (body[:110]='@op70_ca2e85:localhost:46167: refused — admin commands require a cross-signing-verified device')
+  [PASS] cleartext !mint minted no code
+  [PASS] operator cross-signed via /signup/api/crosssign  (msk=4P97+OGoeLR8tL+9… device=OP707e1a)
+Didn't find cross-signing key master of @admin:localhost:46167
+Device @admin:localhost:46167/IBPl5CVC0s isn't cross-signed
+Device @unv70_1d6e64:localhost:46167/UNV7097e9 isn't cross-signed
+Device @unv70_882034:localhost:46167/UNV70ae3c isn't cross-signed
+Device @unv70_1d6e64:localhost:46167/UNV7097e9 isn't cross-signed
+Didn't find cross-signing key master of @unv70_1d6e64:localhost:46167
+Device @unv70_882034:localhost:46167/UNV70ae3c isn't cross-signed
+Didn't find cross-signing key master of @unv70_882034:localhost:46167
+[flow] attempt 1: encrypted !mint pos-b-e00a ($c4icY9ZbGKf4V8tNzFIZr4SsYDZ-qBAqVlZM3w5mhgw)
+Didn't find cross-signing key master of @admin:localhost:46167
+    recv @admin:localhost:46167: 'minted knock code → http://landing:80/join?code=sxHtjYPT\n(label: pos-b-e00a, 2 uses)'
+  [PASS] cross-signed encrypted !mint ACCEPTED (code minted)  (attempts=[(False, True)] body[:110]='minted knock code → http://landing:80/join?code=sxHtjYPT\n(label: pos-b-e00a, 2 uses)')
+  [PASS] no refusal sent to the cross-signed operator  (refusal='')
+  [PASS] admin invited @unv70_6d72ae:localhost:46167 to admin room  (status=200)
+  [PASS] @unv70_6d72ae:localhost:46167 joined admin room  (status=200)
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $3GCkDGWntc4Hrl_wAHldQXYEBSq07zWpFCMgdu1Kz7A: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $c4icY9ZbGKf4V8tNzFIZr4SsYDZ-qBAqVlZM3w5mhgw: Failed to decrypt megolm event: no session with given ID 1kSBymNnruAwbOZVFMCIstBv6DjkkIUpp8IswdPl+7I found
+Failed to decrypt $Q9o-bb4KXpPGVmMUcRJjvvI3sPBMZCXVhWuInwkzTP0: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Device @admin:localhost:46167/IBPl5CVC0s isn't cross-signed
+Device @unv70_1d6e64:localhost:46167/UNV7097e9 isn't cross-signed
+Device @unv70_6d72ae:localhost:46167/UNV706cf0 isn't cross-signed
+Device @unv70_882034:localhost:46167/UNV70ae3c isn't cross-signed
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $3GCkDGWntc4Hrl_wAHldQXYEBSq07zWpFCMgdu1Kz7A: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $c4icY9ZbGKf4V8tNzFIZr4SsYDZ-qBAqVlZM3w5mhgw: Failed to decrypt megolm event: no session with given ID 1kSBymNnruAwbOZVFMCIstBv6DjkkIUpp8IswdPl+7I found
+Failed to decrypt $Q9o-bb4KXpPGVmMUcRJjvvI3sPBMZCXVhWuInwkzTP0: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Device @admin:localhost:46167/IBPl5CVC0s isn't cross-signed
+Didn't find cross-signing key master of @admin:localhost:46167
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Device @unv70_1d6e64:localhost:46167/UNV7097e9 isn't cross-signed
+Didn't find cross-signing key master of @unv70_1d6e64:localhost:46167
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Device @unv70_882034:localhost:46167/UNV70ae3c isn't cross-signed
+Didn't find cross-signing key master of @unv70_882034:localhost:46167
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $3GCkDGWntc4Hrl_wAHldQXYEBSq07zWpFCMgdu1Kz7A: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $c4icY9ZbGKf4V8tNzFIZr4SsYDZ-qBAqVlZM3w5mhgw: Failed to decrypt megolm event: no session with given ID 1kSBymNnruAwbOZVFMCIstBv6DjkkIUpp8IswdPl+7I found
+Failed to decrypt $Q9o-bb4KXpPGVmMUcRJjvvI3sPBMZCXVhWuInwkzTP0: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $3GCkDGWntc4Hrl_wAHldQXYEBSq07zWpFCMgdu1Kz7A: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $c4icY9ZbGKf4V8tNzFIZr4SsYDZ-qBAqVlZM3w5mhgw: Failed to decrypt megolm event: no session with given ID 1kSBymNnruAwbOZVFMCIstBv6DjkkIUpp8IswdPl+7I found
+Failed to decrypt $Q9o-bb4KXpPGVmMUcRJjvvI3sPBMZCXVhWuInwkzTP0: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $MN5VVXvTH6RiAZdFPZm9KuHFRdMVALWiCLFbqqsfxnQ: Failed to decrypt megolm event: no session with given ID Qy01KBXf+DZ49aEMFHsqeij/F46vi2laRyhz3QfO7Ls found
+Failed to decrypt $cI1G2rIiIe7xdQHO7F4PgOx7G7Hd-XIzAQVBgqDesVo: Failed to decrypt megolm event: no session with given ID PprWeCqlYdIfJvicgJmbI6rpyhZiJGRMjYpScDcWiM4 found
+Failed to decrypt $2Jr8_g8quFTp7VAGWRVxcz4s5Js933wN0ZOnuOV3ww4: Failed to decrypt megolm event: no session with given ID Fhu+HWTFj3RzhSP3qFyiQ+A5w2+jzmrfh9uuj7mYisw found
+Failed to decrypt $J7tBTdvlN7-tJETMx0Erk6DVTMLApQRNNwMwW9gpXdI: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $FWodWsAKW3UaPIlLbZownIkIQl2bir8SJiYXGK6e0S4: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $V_nTnEGaZGb8pVF3gIQIKpH3S1lxM68eDIdEMqB32MA: Failed to decrypt megolm event: no session with given ID qwI1sMimdLf0Jod7PIsdyoHmYTVok7cxr6XoMWumx0U found
+Failed to decrypt $qGYg7YMSMDoHMhuChOg65m9Suce7rok1t0VFFywkFc4: Failed to decrypt megolm event: no session with given ID VaBkL7gJrUihGyggaPaHzRe/n0LM7zRkeHs0VflD9NU found
+Failed to decrypt $zqUw2_B-eGrvsM4BpjMk9m7Fn581xxlxK5s2m2epGlo: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $cifqgSsogS1TD1QP1wl6sPzPCXcBuI76VhggQZ8dK4w: Failed to decrypt megolm event: no session with given ID Fnua5QlnnAw1nTU0bCkmbswctuyQZ8n13C3QvFfUZyg found
+Failed to decrypt $dJSRHMRyOP-c2GVc7iG4wJnbkxe02v3egNtDRGRfuuk: Failed to decrypt megolm event: no session with given ID z0jP5ummZV8IivNW9ak/SJAToBnO7g008YFDHR4liBI found
+Failed to decrypt $3GCkDGWntc4Hrl_wAHldQXYEBSq07zWpFCMgdu1Kz7A: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Failed to decrypt $c4icY9ZbGKf4V8tNzFIZr4SsYDZ-qBAqVlZM3w5mhgw: Failed to decrypt megolm event: no session with given ID 1kSBymNnruAwbOZVFMCIstBv6DjkkIUpp8IswdPl+7I found
+Failed to decrypt $Q9o-bb4KXpPGVmMUcRJjvvI3sPBMZCXVhWuInwkzTP0: Failed to decrypt megolm event: no session with given ID RQZzcfGolHXV5N7cPOnrGXZTE2QUCUiQ+3h5GSJK/3w found
+Didn't find cross-signing key master of @admin:localhost:46167
+    recv @admin:localhost:46167: '@unv70_6d72ae:localhost:46167: refused — admin commands require a cross-signing-verified device'
+  [PASS] unverified encrypted !mint refused  (body[:110]='@unv70_6d72ae:localhost:46167: refused — admin commands require a cross-signing-verified device')
+  [PASS] unverified !mint minted no code
+  [PASS] operator re-cross-signed (fresh MSK/SSK — rotated master)  (old=4P97+OGoeLR8… new=smfo/rAKynSJ…)
+Didn't find cross-signing key master of @admin:localhost:46167
+    recv @admin:localhost:46167: '@unv70_6d72ae:localhost:46167: refused — admin commands require a cross-signing-verified device'
+Device @unv70_6d72ae:localhost:46167/UNV706cf0 isn't cross-signed
+Device @unv70_6d72ae:localhost:46167/UNV706cf0 isn't cross-signed
+Didn't find cross-signing key master of @unv70_6d72ae:localhost:46167
+    recv @unv70_6d72ae:localhost:46167: '!mint --uses 1 neg-c-a3fd'
+Didn't find cross-signing key master of @admin:localhost:46167
+    recv @admin:localhost:46167: '@op70_ca2e85:localhost:46167: refused — admin commands require a cross-signing-verified device'
+  [PASS] rotated-master !mint fails closed (refused)  (body[:110]='@op70_ca2e85:localhost:46167: refused — admin commands require a cross-signing-verified device')
+  [PASS] rotated-master !mint minted no code
+
+=== 16/16 pass ===
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x7f8be71d37d0>
+Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x7f8be71e2f50>, 31004730.803963535), (<aiohttp.client_proto.ResponseHandler object at 0x7f8be71e0a50>, 31004732.806421313)])']
+connector: <aiohttp.connector.TCPConnector object at 0x7f8be71d3810>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x7f8be76cc790>
+Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x7f8be71e07d0>, 31004730.696687065)])']
+connector: <aiohttp.connector.TCPConnector object at 0x7f8be7b35fd0>

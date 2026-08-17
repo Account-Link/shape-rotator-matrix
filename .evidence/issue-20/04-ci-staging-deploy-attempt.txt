@@ -1,0 +1,8 @@
+# CI: ephemeral staging deploy of THIS branch, auto-triggered by the rebase push
+# run 32073507501 — workflow "ephemeral staging validation", event=pull_request, head=ready-20, 2026-08-17T21:54:55Z, conclusion=failure
+
+2026-08-17T21:55:17.9201079Z   echo "::error::phala rejected our credentials (401/403) — the PHALA_API_KEY secret is stale or invalid. Polling cannot fix this; refresh the secret and re-dispatch."
+2026-08-17T21:55:18.7842686Z Message: Invalid API key
+2026-08-17T21:55:18.7843577Z HTTP: 401 Unauthorized
+2026-08-17T21:55:20.0220191Z Message: Invalid API key
+2026-08-17T21:55:20.0221220Z HTTP: 401 Unauthorized
