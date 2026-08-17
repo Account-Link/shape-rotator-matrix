@@ -1,0 +1,8 @@
+=== 2. bash -n on every inline run: script ===
+[1] install phala CLI: OK
+[2] sweep orphaned staging CVMs from a crashed prior run: OK
+[3] build staging env (throwaway secrets + one-shot codes): OK
+[4] phase 1 — create ephemeral CVM, poll until running: OK
+[5] resolve staging endpoint URL: OK
+[6] phase 2 — bootstrap fixtures, redeploy, run smoke: OK
+[7] always tear down the ephemeral CVM (+ orphan sweep): OK

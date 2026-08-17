@@ -1,0 +1,24 @@
+=== 6. First manual workflow_dispatch (run 31968806742, 2026-08-16) — real transcript ===
+Dispatched by the operator at 19:51Z. The workflow fired end-to-end exactly as designed
+(orphan sweep -> env build -> phase 1) and failed LOUD at PR time — but on a credential,
+not a code path:
+
+    validate  phase 1  19:51:26Z  Provisioning CVM staging-pr-31968806742...
+    validate  phase 1  19:51:26Z  CVM deployment failed.
+    validate  phase 1  19:51:26Z  Message: Invalid API key
+    validate  phase 1  19:51:26Z  Request: POST https://cloud-api.phala.com/api/v1/cvms/provision
+    validate  phase 1  19:51:26Z  HTTP: 401 Unauthorized
+    validate  phase 1  19:51:27Z .. 20:02:38Z  [phase1 i/60] cvm status: absent / err   (all 60 polls)
+    validate  phase 1  20:02:38Z  ##[error]CVM did not reach running (last=err) — ... failure caught at PR time
+    check conclusion: validate=FAILURE (11m31s), e2e=SUCCESS
+
+Two independent transports reject the same credential:
+  - GitHub runner (repo secret PHALA_API_KEY, set 2026-05-28): 401 Invalid API key
+  - this box's only phala profile (amiller-users-projects): `phala status`/`whoami`/`cvms list` -> Invalid API key
+=> the PHALA_API_KEY value itself is stale/revoked. No CVM was created (billing impact: zero).
+Run URL: https://github.com/teleport-computer/shape-rotator-matrix/actions/runs/31968806742
+
+What this run DID prove live in CI: workflow triggers on dispatch, phala CLI installs,
+secrets/env plumbing works (secret resolves + is masked), the 10-min poll ceiling and the
+fail-loud ::error both fire, teardown/orphan-sweep step runs with nothing to sweep.
+What it could NOT prove: create -> running -> smoke -> teardown with a live CVM (blocked on the key).

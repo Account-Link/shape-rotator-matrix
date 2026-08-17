@@ -1,0 +1,101 @@
+# Ephemeral PR-time validation compose (issue #14).
+#
+# Same service shape as docker-compose.yml, but stripped of everything that
+# needs prod-only config:
+#   - NO dstack-ingress / NO Namecheap DNS-01 / NO real TLS certificate.
+#   - NO real domain. The landing nginx is exposed directly on Phala port 80;
+#     its `location /` already proxies /_matrix/* -> continuuwuity:6167 and
+#     /signup/api -> knock-approver:8001 (see landing/nginx.conf), so the
+#     smoke test reaches the full Matrix client API on the raw phala URL.
+#   - throwaway REGISTRATION_TOKEN, throwaway MATRIX_SERVER_NAME.
+#
+# This file is NEVER used by the prod deploy (deploy.yml uses docker-compose.yml
+# exclusively). It exists only to be spun up by .github/workflows/staging-validate.yml
+# against a fresh CVM that lives ~5-10 minutes and is torn down regardless of outcome.
+#
+# Keep the continuwuity / knock-approver / landing service definitions here in
+# sync with docker-compose.yml when prod changes a service env var — that drift
+# is exactly what this staging run is meant to surface.
+services:
+  landing:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    environment:
+      INDEX_B64: ${INDEX_B64}
+      JOIN_B64: ${JOIN_B64}
+      SIGNUP_B64: ${SIGNUP_B64}
+      NGINX_CONF_B64: ${NGINX_CONF_B64}
+      RESPONDER_B64: ${RESPONDER_B64}
+      SAS_VERIFICATION_B64: ${SAS_VERIFICATION_B64}
+    command: >
+      sh -c '
+      echo "$$INDEX_B64"            | base64 -d > /usr/share/nginx/html/index.html &&
+      echo "$$JOIN_B64"             | base64 -d > /usr/share/nginx/html/join.html &&
+      echo "$$SIGNUP_B64"           | base64 -d > /usr/share/nginx/html/signup.html &&
+      echo "$$RESPONDER_B64"        | base64 -d > /usr/share/nginx/html/responder.py &&
+      echo "$$SAS_VERIFICATION_B64" | base64 -d > /usr/share/nginx/html/sas_verification.py &&
+      echo "$$NGINX_CONF_B64"       | base64 -d > /etc/nginx/conf.d/default.conf &&
+      exec nginx -g "daemon off;"
+      '
+    restart: unless-stopped
+    depends_on:
+      - continuwuity
+      - knock-approver
+
+  continuwuity:
+    image: ghcr.io/continuwuity/continuwuity:latest
+    environment:
+      # Throwaway server name — becomes part of mxids on this ephemeral CVM only.
+      CONDUWUIT_SERVER_NAME: ${MATRIX_SERVER_NAME}
+      CONDUWUIT_DATABASE_BACKEND: rocksdb
+      CONDUWUIT_DATABASE_PATH: /var/lib/conduwuity
+      CONDUWUIT_ADDRESS: "0.0.0.0"
+      CONDUWUIT_PORT: "6167"
+      CONDUWUIT_ALLOW_REGISTRATION: "true"
+      CONDUWUIT_REGISTRATION_TOKEN: ${REGISTRATION_TOKEN}
+      # Staging is single-node and ephemeral — no federation, no well_known.
+      CONDUWUIT_ALLOW_FEDERATION: "false"
+      CONDUWUIT_NEW_USER_DISPLAYNAME_SUFFIX: ""
+      CONDUWUIT_LOG: info
+    volumes:
+      - continuwuity-data:/var/lib/conduwuity
+    restart: unless-stopped
+
+  knock-approver:
+    image: python:3.11-slim
+    environment:
+      # Internal docker-network name for egress; landing nginx holds the public face.
+      HS: http://continuwuity:6167
+      HS_PUBLIC: ${HOMESERVER}
+      # Phase-1 deploys with an invalid token; phase-2 (after staging_bootstrap.py)
+      # redeploys with the freshly-minted admin token written into the env file.
+      MATRIX_TOKEN: ${KNOCK_APPROVER_TOKEN}
+      ONBOARDING_BOT_TOKEN: ${KNOCK_APPROVER_TOKEN}
+      SPACE_ID: ${SHAPEROTATOR_SPACE_ID}
+      SPACE_CHILD_IDS: ${SPACE_CHILD_IDS}
+      ONBOARDING_INVITER_MXID: ${ONBOARDING_INVITER_MXID}
+      CONDUWUIT_REGISTRATION_TOKEN: ${REGISTRATION_TOKEN}
+      APPROVER_B64: ${APPROVER_B64}
+      INITIAL_CODES: ${INITIAL_CODES}
+      INITIAL_SIGNUP_CODES: ${INITIAL_SIGNUP_CODES}
+      ADMIN_COMMAND_ROOM: ${SHAPEROTATOR_SPACE_ID}
+      ADMIN_PL_THRESHOLD: "50"
+      ADMIN_ALLOWLIST: ${ADMIN_ALLOWLIST}
+      FEED_ROOM: ""
+    volumes:
+      - knock-data:/data
+    command: >
+      sh -c '
+      apt-get update -qq && apt-get install -y --no-install-recommends -qq libolm3 libolm-dev gcc &&
+      pip install --quiet aiohttp cryptography mautrix asyncpg aiosqlite python-olm unpaddedbase64 base58 pyaes pycryptodome &&
+      echo "$$APPROVER_B64" | base64 -d > /app.py &&
+      exec python -u /app.py
+      '
+    restart: unless-stopped
+    depends_on:
+      - continuwuity
+
+volumes:
+  continuwuity-data:
+  knock-data:
