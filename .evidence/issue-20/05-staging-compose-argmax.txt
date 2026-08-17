@@ -1,0 +1,12 @@
+# Deploy-path finding (report, not fixed here): APPROVER_B64 exceeds the kernel per-argument limit
+
+knock-approver/approver.py @ 4879fde: 129161 bytes -> base64 172216 bytes
+origin/staging (pre-#70): 127217 bytes -> base64 169624 bytes
+kernel MAX_ARG_STRLEN (single exec argument): 131072 bytes
+
+## Repro (docker-compose.staging.yml, as the #69 staging-validate workflow deploys it):
+rw70argmax-knock-approver-1  | exec /usr/bin/sh: argument list too long
+rw70argmax-knock-approver-1  | exec /usr/bin/sh: argument list too long
+rw70argmax-knock-approver-1  | exec /usr/bin/sh: argument list too long
+
+Same pattern in PROD docker-compose.yml line 118: `echo "$APPROVER_B64" | base64 -d > /app.py` — the next v* tag deploy with an approver.py this size crash-loops knock-approver the same way.

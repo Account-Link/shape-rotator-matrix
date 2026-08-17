@@ -1,0 +1,23 @@
+rw70e2e-knock-approver-1  | approver starting. space=!1rumgQZ1Lds6Ubmo7mFnGNW4JDE9jU7hRMXy1_LWW34 signup_enabled=True server_name='localhost:46167'
+rw70e2e-knock-approver-1  | [lobby sync] running as @admin:localhost:46167; device=IBPl5CVC0s
+rw70e2e-knock-approver-1  | [startup] running as @admin:localhost:46167; device=IBPl5CVC0s; admin room=!SBRQTcFAwh6bIqOh7upi9CHySj222M_La3orInMr7LQ; allowlist=(empty)
+rw70e2e-knock-approver-1  | [admin] refused !mint from @op70_b90f18:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [crosssign ok] @op70_b90f18:localhost:46167 msk=rjclsGamW+tMOjpJQ2nR...
+rw70e2e-knock-approver-1  | [admin] dispatch !mint from @op70_b90f18:localhost:46167 is_admin=True
+rw70e2e-knock-approver-1  | [admin] sending reply: 'minted knock code → http://landing:80/join?code=KHW5b8Hy\n(label: pos-b-5b4a, 2 uses)'
+rw70e2e-knock-approver-1  | [admin] refused !mint from @unv70_1d6e64:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [crosssign] homeserver requires UIA; pass `password` to /crosssign
+rw70e2e-knock-approver-1  | [admin] refused !mint from @op70_70c01c:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [crosssign ok] @op70_70c01c:localhost:46167 msk=4/+sNO8bE/NI9gmgt09z...
+rw70e2e-knock-approver-1  | [admin] dispatch !mint from @op70_70c01c:localhost:46167 is_admin=True
+rw70e2e-knock-approver-1  | [admin] sending reply: 'minted knock code → http://landing:80/join?code=cNq8vTU4\n(label: pos-b-b1ac, 2 uses)'
+rw70e2e-knock-approver-1  | [admin] refused !mint from @unv70_882034:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [crosssign ok] @op70_70c01c:localhost:46167 msk=1/G0bxk/ahzVK4k54TMO...
+rw70e2e-knock-approver-1  | [admin] refused !mint from @op70_70c01c:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [admin] refused !mint from @op70_ca2e85:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [crosssign ok] @op70_ca2e85:localhost:46167 msk=4P97+OGoeLR8tL+9UeDs...
+rw70e2e-knock-approver-1  | [admin] dispatch !mint from @op70_ca2e85:localhost:46167 is_admin=True
+rw70e2e-knock-approver-1  | [admin] sending reply: 'minted knock code → http://landing:80/join?code=sxHtjYPT\n(label: pos-b-e00a, 2 uses)'
+rw70e2e-knock-approver-1  | [admin] refused !mint from @unv70_6d72ae:localhost:46167: unverified device
+rw70e2e-knock-approver-1  | [crosssign ok] @op70_ca2e85:localhost:46167 msk=smfo/rAKynSJKxcOE3rb...
+rw70e2e-knock-approver-1  | [admin] refused !mint from @op70_ca2e85:localhost:46167: unverified device

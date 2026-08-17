@@ -1393,6 +1393,37 @@ async def _is_admin(client, room_id, sender):
     return (await _get_user_pl(client, room_id, sender)) >= ADMIN_PL_THRESHOLD
 
 
+def _admin_event_trust_state(event):
+    """Return the crypto trust state attached by mautrix to a decrypted event.
+
+    A Matrix event's sender MXID and room power level are not enough for an
+    admin command: a compromised homeserver can forge both.  Only decrypted
+    Megolm events carry mautrix's device-chain result, so cleartext commands
+    deliberately resolve to UNVERIFIED.
+    """
+    metadata = event.get("mautrix", {}) or {}
+    if not metadata.get("was_encrypted"):
+        return _MAU_TrustState.UNVERIFIED
+    trust = metadata.get("trust_state", _MAU_TrustState.UNVERIFIED)
+    try:
+        return trust if isinstance(trust, _MAU_TrustState) else _MAU_TrustState(trust)
+    except (TypeError, ValueError):
+        return _MAU_TrustState.UNVERIFIED
+
+
+def _is_cross_signed_admin_event(event):
+    """Require a stable, cross-signed sender device for admin commands.
+
+    CROSS_SIGNED_TOFU means the device is signed by the user's self-signing
+    key, which is signed by the user's master key, and that master key has not
+    changed since the bot first observed it.  A rotation therefore fails
+    closed until the operator explicitly re-verifies/reprovisions the bot's
+    crypto store.  This is the strongest trust state mautrix-python 0.19 can
+    resolve without its unfinished local-user-trust implementation.
+    """
+    return _admin_event_trust_state(event) >= _MAU_TrustState.CROSS_SIGNED_TOFU
+
+
 def _new_code():
     return secrets.token_urlsafe(6).rstrip("=").replace("_", "").replace("-", "")[:9] or secrets.token_hex(4)
 
@@ -1919,7 +1950,8 @@ async def cmd_help(client, room_id, sender, args):
 COMMANDS["!help"] = cmd_help
 
 
-async def process_admin_command(client, room_id, event_id, sender, body):
+async def process_admin_command(client, room_id, event_id, sender, body,
+                                cross_signed=False):
     if not OUR_MXID:
         # /whoami failed at startup; refuse to process anything to avoid
         # ever responding to our own replies (which would loop).
@@ -1931,6 +1963,12 @@ async def process_admin_command(client, room_id, event_id, sender, body):
     args = parts[1] if len(parts) > 1 else ""
     handler = COMMANDS.get(cmd)
     if not handler:
+        return
+    if not cross_signed:
+        print(f"[admin] refused {cmd} from {sender}: unverified device", flush=True)
+        await _send_msg(client, room_id,
+            f"{sender}: refused — admin commands require a cross-signing-verified device")
+        audit({"type": "admin_unverified", "cmd": cmd, "sender": sender})
         return
     is_admin = await _is_admin(client, room_id, sender)
     print(f"[admin] dispatch {cmd} from {sender} is_admin={is_admin}", flush=True)
@@ -2275,7 +2313,8 @@ async def sync_loop():
             body = (getattr(evt.content, "body", "") or "").strip()
             if not body.startswith("!"):
                 return
-            await admin_queue.put((str(evt.event_id), ev_sender, body))
+            await admin_queue.put((str(evt.event_id), ev_sender, body,
+                                   _is_cross_signed_admin_event(evt)))
         except Exception as e:
             print(f"[admin handler] {type(e).__name__}: {e}", flush=True)
 
@@ -2360,10 +2399,11 @@ async def sync_loop():
         # them with decrypted message events).
         while not admin_queue.empty():
             try:
-                ev_id, sender, body = admin_queue.get_nowait()
+                ev_id, sender, body, cross_signed = admin_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            await process_admin_command(client, ADMIN_COMMAND_ROOM, ev_id, sender, body)
+            await process_admin_command(client, ADMIN_COMMAND_ROOM, ev_id, sender,
+                                        body, cross_signed)
 
 
 # --- Signup auth proxy ---
