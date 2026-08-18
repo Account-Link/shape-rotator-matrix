@@ -328,7 +328,10 @@ async def export_inbound_sessions(cs, dest=None):
     for row in rows:
         sess = await cs.get_group_session(row["room_id"], row["session_id"])
         if sess is None:
-            continue
+            raise RuntimeError(
+                "inbound megolm session disappeared during escrow export: "
+                f"room={row['room_id']} session={row['session_id']}"
+            )
         out.append({
             "room_id":          str(sess.room_id),
             "sender_key":       str(sess.sender_key),
@@ -2818,10 +2821,8 @@ async def main():
         # messages stay decryptable after re-mint (issue #60). Only the
         # device-rotated path has a known old pickle key to read from; the
         # transition case (no cached device_id) cannot be escrowed and those
-        # stale pickles were unreadable anyway. An export failure PROPAGATES
-        # and blocks the wipe — same loud-failure contract as the import side:
-        # we refuse to destroy the store's history on a failure we can't
-        # explain rather than boot looking healthy with history silently lost.
+        # stale pickles were unreadable anyway. Escrow failure propagates so
+        # the store is never wiped after an unsuccessful backup.
         if sr2_cached_device_before:
             _n = await _export_escrow_for_wipe(sr2_mxid, sr2_cached_device_before)
             print(f"[self-heal] escrowed {_n} inbound megolm sessions to "
