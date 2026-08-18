@@ -1,32 +1,50 @@
-# PLAN — issue #60: escrow durability (megolm inbound sessions survive self-heal wipe)
+# PLAN — issue #77: session_id → age index (#76 chip 1)
 
-Branch: `ready-60` (base `staging`). Tier 1 (backend/self-heal; no UI surface).
+Derived from the issue's `## Acceptance`. Base: `staging`. Branch: `ready-77`.
 
-## Acceptance (from issue #60)
-A test in `tests/` (dev stack, style of `history_e2ee_repro.py`) showing:
-bot client receives an encrypted message → simulate re-mint (run the ACTUAL
-export/wipe/import functions with a NEW device_id + fresh store, not a
-hand-rolled imitation) → bot still decrypts the old message. Test run output
-in the PR. Tier 1: test transcript is the evidence.
+## Goal
+The bot must be able to tell how old a megolm session is. Build a cleartext
+index `room_id -> {session_id: earliest_origin_server_ts}` off `m.room.encrypted`
+events as they arrive in `/sync` (no decryption needed — `session_id` and
+`origin_server_ts` are cleartext). Persist to `/data`; survive restart; raise on
+read failure (no silent skip — issue #60 convention).
 
-## Tasks
-- [x] Read MATRIX_ONBOARDING.md (required), self_heal_unit.py, PR #59 primitive.
-- [x] Confirm mautrix API: `export_session(idx)->str`, `import_session(session_key,...)`,
-      `put_group_session`, enumerate via SQL on `crypto_megolm_inbound_session`.
-- [x] **approver.py**: add `ESCROW_PATH`, `export_inbound_sessions(cs)`,
-      `import_inbound_sessions(cs)` (raises on per-session failure, no skip),
-      `_export_escrow_for_wipe(mxid, old_device_id)` helper.
-- [x] **approver.py main()**: export BEFORE `_wipe_crypto_store()`.
-- [x] **approver.py sync_loop()**: import AFTER fresh store opens.
-- [x] **tests/escrow_durability.py**: bot devA receives+decrypts → export → wipe →
-      fresh store w/ NEW device_id → import → old msg still decrypts. Uses the
-      ACTUAL approver functions + sas_e2e helpers.
-- [x] Run the test against the dev stack (continuwuity in docker; test in the
-      `tests/Dockerfile` runner, `--network host`). Capture transcript.
-- [x] Commit (incl. transcript), push, open PR to staging. Remove `ready` label.
+## Work items (from the issue)
+- [x] `record_session(room_id, session_id, ts)` keeping the **minimum** ts, and
+      `session_age_index(room_id) -> {session_id: earliest_ts}` — added to
+      `knock-approver/approver.py` (matches the existing monolithic layout: the
+      #60 escrow helpers live here too).
+- [x] `iter_encrypted_events(rooms_data)` generator (style of
+      `iter_knock_events`) + hook into `sync_loop` after `handle_sync`, where
+      `m.room.encrypted` events are present.
+- [x] Persist to `/data/session_age_index.json` via the atomic `_load`/`_save`
+      helpers; the disk file is the source of truth on every call, so restart-
+      survival is structural, not a special case. Missing file = first-boot `{}`;
+      corrupt file propagates (raises) — no silent skip.
 
-## Notes (issue constraints)
-- plaintext in /data is fine (same trust domain as bot_crypto.db).
-- imported sessions carry forwarding chain / lower trust — expected.
-- keep the escrow file after import (it IS the durable escrow; replaced next wipe).
-- import MUST raise, never silently skip (no fallbacks).
+## Acceptance (restate) + how each is verified
+A test in `tests/` against the dev stack (style of `history_e2ee_repro.py` /
+`escrow_durability.py`) → `tests/session_age_index.py`.
+
+1. Bot creates a room and is present from event 0.
+2. Send messages, force at least one megolm rotation so >1 session exists.
+   → force rotation by `await alice.crypto.crypto_store
+     .remove_outbound_group_sessions([room_id])` before the 2nd send (mautrix
+     then mints a new outbound session_id on the next encrypt).
+3. Every session present in `crypto_megolm_inbound_session` has an index entry.
+   → query `SELECT session_id FROM crypto_megolm_inbound_session WHERE
+     account_id=bot AND room_id=room AND withheld_code IS NULL`, assert each is
+     in `session_age_index(room_id)`.
+4. Each indexed timestamp equals the `origin_server_ts` of the earliest event
+   that used that session.
+   → back-paginate `/messages`, group `m.room.encrypted` by `session_id`,
+     take `min(origin_server_ts)`, assert == indexed value for every session.
+5. Index survives a restart of the bot.
+   → fresh Python subprocess imports `approver` against the same persisted file
+     and re-reads `session_age_index(room_id)`; compare to in-process result.
+
+Evidence: transcript captured to `.evidence/issue-77/` (Tier 1 — no user-visible
+surface; matches the `escrow_durability.py` precedent cited by the issue via #60).
+
+## Out of scope (per issue)
+Backfill of existing rooms. Any *use* of the index — that's chips 3 and 4.

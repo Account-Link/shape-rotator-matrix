@@ -92,6 +92,14 @@ CRYPTO_DB     = Path(os.environ.get("CRYPTO_DB", "/data/bot_crypto.db"))
 # (issue #60). Plaintext is fine: same /data volume + trust domain as
 # bot_crypto.db itself. The file IS the escrow — replaced on each wipe.
 ESCROW_PATH   = Path(os.environ.get("ESCROW_PATH", "/data/inbound_sessions.escrow.json"))
+# session_id -> earliest-seen origin_server_ts index, per room (issue #77, chip
+# 1 of the retention epic #76). Built cleartext off m.room.encrypted events as
+# they arrive in /sync (content.session_id + origin_server_ts, no decryption
+# needed) and persisted atomically. Answers "how old is the oldest message we
+# still hold for this megolm session". Same /data trust domain as bot_crypto.db
+# and the escrow (issue #60 precedent).
+SESSION_INDEX_PATH = Path(os.environ.get("SESSION_INDEX_PATH",
+                                         "/data/session_age_index.json"))
 
 # Set by sync_loop once the persistent Olm store is open.  The inviter-side
 # MSC4268 builder deliberately uses the same store as the running bot; a
@@ -434,6 +442,31 @@ def _endorser_for_code(code, fallback):
     endorser for those bot-autonomous flows)."""
     entry = _load(CODES_PATH).get(code) or {}
     return entry.get("minted_by") or fallback
+
+# --- session_id -> earliest-ts age index (issue #77) ---
+# The disk file is the source of truth: record_session loads-mutates-saves it on
+# every call, so a process restart between syncs sees the same index by
+# construction (no in-memory cache to lose). A missing file is a first-boot {}
+# (not an error); a corrupt file RAISES via _load (json.loads) — no silent skip
+# of state loss, the #60 convention.
+
+def record_session(room_id, session_id, ts):
+    """Record that megolm `session_id` was seen in `room_id` at ms-timestamp
+    `ts`, keeping the EARLIEST ts seen (the index answers 'how old is the oldest
+    message we still hold for this session'). Persists atomically. Existing
+    entries with a smaller ts are left untouched."""
+    ts = int(ts)
+    index = _load(SESSION_INDEX_PATH)
+    room = index.setdefault(room_id, {})
+    if session_id not in room or ts < room[session_id]:
+        room[session_id] = ts
+        _save(SESSION_INDEX_PATH, index)
+
+def session_age_index(room_id):
+    """Return {session_id: earliest_ts} for `room_id` (empty dict if the room
+    has no indexed sessions). Reads live from the persisted file, so a caller
+    always sees state that survives a restart."""
+    return dict(_load(SESSION_INDEX_PATH).get(room_id, {}))
 
 def merge_seed(path, env_key):
     """Merge JSON from env var into the codes file; only adds missing keys."""
@@ -782,6 +815,26 @@ def iter_knock_events(rooms_data):
                 if c.get("membership") != "knock":
                     continue
                 yield room_id, ev["state_key"], c.get("reason", "")
+
+
+def iter_encrypted_events(rooms_data):
+    """Yield (room_id, session_id, origin_server_ts) for every megolm
+    m.room.encrypted timeline event in a /sync batch, in arrival order.
+
+    session_id is a cleartext field on m.room.encrypted and origin_server_ts is
+    the event's top-level timestamp, so the session-age index (issue #77) can be
+    built WITHOUT decrypting anything. Events lacking session_id/ts (a non-megolm
+    or malformed shape) are skipped — a non-event, not a state read failure."""
+    for room_id, rd in rooms_data.get("join", {}).items():
+        for ev in rd.get("timeline", {}).get("events", []):
+            if ev.get("type") != "m.room.encrypted":
+                continue
+            c = ev.get("content") or {}
+            sid = c.get("session_id")
+            ts = ev.get("origin_server_ts")
+            if sid is None or ts is None:
+                continue
+            yield room_id, sid, int(ts)
 
 
 def iter_vetting_rooms(rooms_data, vetting_state):
@@ -2376,6 +2429,18 @@ async def sync_loop():
             v_dirty = True
         if v_dirty:
             _save(VETTING_PATH, vetting_state)
+
+        # session_id -> earliest-ts age index (retention epic #76, chip 1 / #77).
+        # Built cleartext off the m.room.encrypted events the bot just received;
+        # record_session keeps the min ts and persists atomically. Wrapped like
+        # announce_lobby_events above so a transient index-write fault logs
+        # loudly without killing the sync heartbeat (the next event re-records).
+        for rid, sid, its in iter_encrypted_events(data.get("rooms", {})):
+            try:
+                record_session(rid, sid, its)
+            except Exception as e:
+                print(f"[session_index error] {type(e).__name__}: {e}",
+                      flush=True)
 
         # Lobby flow runs in its own /sync loop (lobby_sync_loop) under the
         # dedicated onboarding-bot identity (LOBBY_TOKEN), so it doesn't appear
