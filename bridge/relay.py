@@ -806,6 +806,19 @@ async def run(args) -> int:
             "BotFather (/setprivacy -> Disable) or make the bot a group admin."
         )
 
+    # Human-readable group names for the relay prefix and the operator view.
+    # Cosmetic only, so a getChat failure degrades the label to the numeric id
+    # rather than taking down the run.
+    chat_titles = {}
+    for cid in tg_chat_ids:
+        try:
+            info = await tg_client.call("getChat", chat_id=cid)
+            chat_titles[cid] = info.get("title") or info.get("username") or str(cid)
+        except Exception as exc:
+            log("tg", f"getChat {cid} failed ({type(exc).__name__}); using the numeric id")
+            chat_titles[cid] = str(cid)
+    log("tg", "bridging " + ", ".join(f"{t} ({c})" for c, t in chat_titles.items()))
+
     # Run the SAME bootstrap the mx.py CLI does, rather than assuming someone
     # ran it first. In a container there is no operator to run `mx.py send`
     # beforehand: the device is minted at boot, so if the relay only called
