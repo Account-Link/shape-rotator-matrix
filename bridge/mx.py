@@ -63,6 +63,10 @@ CRYPTO_DB = STORE_DIR / "crypto.db"
 SYNC_CURSOR = STORE_DIR / "next_batch"
 RECOVERY_PATH = STORE_DIR / "recovery_key.txt"
 WOKE_MARKER = STORE_DIR / ".woke"
+# Set once this device has been signed by the account's existing cross-signing
+# key. Separate from .woke: waking is about megolm shares, this is about the
+# trust shield.
+VERIFIED_MARKER = STORE_DIR / ".verified"
 FIXTURES_PATH = Path(
     os.environ.get(
         "MX_FIXTURES", str(Path.home() / ".teleport-travel/test-fixtures.json")
@@ -281,10 +285,46 @@ async def bootstrap(client):
     # Upload our olm identity + one-time keys if the server has none yet.
     await olm.share_keys()
     if await olm.get_own_cross_signing_public_keys() is not None:
+        # The ACCOUNT is already cross-signed, but THIS device may not be —
+        # which is the case for any re-minted device (see
+        # bootstrap_creds_from_password). generate_recovery_key() would be a
+        # no-op here, so the new device stays unsigned and Element shows
+        # "Encrypted by a device not verified by its owner" forever.
+        # verify_with_recovery_key() unlocks SSSS with the account's existing
+        # recovery key and signs this device with the existing SSK.
+        # MATRIX_ONBOARDING.md: "recovery-key path on next start with
+        # MATRIX_RECOVERY_KEY set will recover."
+        await _verify_this_device(olm)
         return False
     recovery_key = await olm.generate_recovery_key()
     RECOVERY_PATH.write_text(recovery_key + "\n")
     os.chmod(RECOVERY_PATH, stat.S_IRUSR | stat.S_IWUSR)
+    return True
+
+
+async def _verify_this_device(olm) -> bool:
+    """Self-verify this device against the account's existing cross-signing.
+
+    No-op once the marker exists, so it runs once per device rather than every
+    start. Absent a recovery key we say so loudly rather than leaving the
+    operator to discover the yellow shield in Element."""
+    if VERIFIED_MARKER.exists():
+        return False
+    recovery_key = os.environ.get("MATRIX_RECOVERY_KEY") or (
+        RECOVERY_PATH.read_text().strip() if RECOVERY_PATH.exists() else ""
+    )
+    if not recovery_key:
+        print(
+            "WARNING: account is cross-signed but this device is not, and no "
+            "MATRIX_RECOVERY_KEY (or store/recovery_key.txt) is available to "
+            "sign it. Element will show 'Encrypted by a device not verified by "
+            "its owner' for every message this device sends.",
+            file=sys.stderr, flush=True,
+        )
+        return False
+    await olm.verify_with_recovery_key(recovery_key)
+    VERIFIED_MARKER.write_text(str(int(time.time())))
+    print("cross-signed this device via recovery key", flush=True)
     return True
 
 

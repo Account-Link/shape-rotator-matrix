@@ -75,6 +75,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mx import (
     STORE_DIR as MX_STORE_DIR,
     _shutdown as mx_shutdown,
+    ensure_ready as mx_ensure_ready,
     load_config as mx_load_config,
     make_client as mx_make_client,
 )
@@ -426,9 +427,13 @@ async def run(args) -> int:
             "BotFather (/setprivacy -> Disable) or make the bot a group admin."
         )
 
-    # mx.py already bootstrapped the device once (cross-signed, wake posted).
-    # share_keys is idempotent — a no-op once device keys are on the server.
-    await mx_client.crypto.share_keys()
+    # Run the SAME bootstrap the mx.py CLI does, rather than assuming someone
+    # ran it first. In a container there is no operator to run `mx.py send`
+    # beforehand: the device is minted at boot, so if the relay only called
+    # share_keys() the device would never be cross-signed (yellow shield in
+    # Element) and would never post the wake message that makes other clients
+    # share megolm keys to it. Both are idempotent and marker-guarded.
+    await mx_ensure_ready(mx_client, room)
 
     log(
         "relay",

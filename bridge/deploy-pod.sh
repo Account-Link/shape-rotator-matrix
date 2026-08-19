@@ -60,6 +60,16 @@ MX_PW="${MATRIX_BRIDGE_PASSWORD:-}"
 [ -z "$MX_PW" ] && [ -f "$MX_PW_FILE" ] && MX_PW="$(tr -d '[:space:]' <"$MX_PW_FILE")"
 [ -n "$MX_PW" ] || die "no MATRIX_BRIDGE_PASSWORD (looked in \$MATRIX_BRIDGE_PASSWORD and $MX_PW_FILE)"
 
+# Recovery key: signs a RE-MINTED device against the account's existing
+# cross-signing. Without it Element shows "Encrypted by a device not verified
+# by its owner" on every relayed message, because generate_recovery_key() is a
+# no-op once the account already has cross-signing keys. Optional so the script
+# still runs without it -- mx.py warns loudly at boot instead of failing quiet.
+MX_RK_FILE="$HOME/.shape-bridge-bot/matrix-recovery-key"
+MX_RK="${MATRIX_RECOVERY_KEY:-}"
+[ -z "$MX_RK" ] && [ -f "$MX_RK_FILE" ] && MX_RK="$(tr -d "[:space:]" <"$MX_RK_FILE")"
+[ -n "$MX_RK" ] || echo "deploy-pod: WARNING no recovery key -- device will show the unverified shield" >&2
+
 # --- fixtures: the ONLY venues this relay may touch --------------------------
 FIXTURES="$HOME/.teleport-travel/test-fixtures.json"
 [ -f "$FIXTURES" ] || die "missing fixtures $FIXTURES"
@@ -85,7 +95,7 @@ echo "deploy-pod: pinned $DIGEST"
 # --- deploy ------------------------------------------------------------------
 # The fixtures ride along as env so the container needs no bind mount; relay.py
 # still refuses to touch anything but this pair.
-payload="$(TG_TOKEN="$TG_TOKEN" MX_PW="$MX_PW" python3 - "$DIGEST" "$NAME" "$ROOM" "$CHAT" "$MATRIX_USER" "$MATRIX_HS" <<'PY'
+payload="$(TG_TOKEN="$TG_TOKEN" MX_PW="$MX_PW" MX_RK="$MX_RK" python3 - "$DIGEST" "$NAME" "$ROOM" "$CHAT" "$MATRIX_USER" "$MATRIX_HS" <<'PY'
 import json, os, sys
 digest, name, room, chat, user, hs = sys.argv[1:7]
 print(json.dumps({
@@ -99,6 +109,7 @@ print(json.dumps({
         "TELEGRAM_BOT_TOKEN": os.environ["TG_TOKEN"],
         "MATRIX_BRIDGE_USER": user,
         "MATRIX_BRIDGE_PASSWORD": os.environ["MX_PW"],
+        "MATRIX_RECOVERY_KEY": os.environ.get("MX_RK", ""),
         "MATRIX_HOMESERVER": hs,
         "MATRIX_ROOM_ID": room,
         "TELEGRAM_CHAT_ID": str(chat),
