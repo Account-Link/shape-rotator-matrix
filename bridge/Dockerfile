@@ -29,6 +29,8 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /app
 COPY mx.py tg.py relay.py /app/bridge/
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Point every path at the persistent volume. These are the same env overrides
 # the CLIs already honour, so no code is container-specific.
@@ -44,4 +46,5 @@ ENV MX_CREDS=/data/creds.json \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8080
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python3", "bridge/relay.py"]
