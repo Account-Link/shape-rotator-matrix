@@ -83,7 +83,7 @@ from mx import (
 from tg import (
     _sender_name as tg_sender_name,
     get_updates as tg_get_updates,
-    load_chat_id as tg_load_chat_id,
+    load_chat_ids as tg_load_chat_ids,
     make_client as tg_make_client,
     relay_html as tg_relay_html,
     send_message as tg_send_message,
@@ -156,6 +156,7 @@ class State:
         # no sender, no content, no per-message timestamps. Enough to show the
         # service is used without describing who said what to whom.
         self.buckets = {int(k): int(v) for k, v in (s.get("buckets") or {}).items()}
+        self.unconfigured = dict(s.get("unconfigured") or {})
         self.stats = {
             "tg_to_mx": int(s.get("tg_to_mx", 0)),
             "mx_to_tg": int(s.get("mx_to_tg", 0)),
@@ -163,6 +164,23 @@ class State:
             "last_relay": s.get("last_relay"),
             "restarts": int(s.get("restarts", 0)),
         }
+
+    def note_unconfigured(self, chat: dict) -> None:
+        """Remember a chat the bot is in but the fixtures do not name.
+
+        Discovery aid: a new group's id is otherwise unknowable, since the relay
+        consumes and drops its updates and a bot cannot read history."""
+        cid = str(chat["id"])
+        prev = self.unconfigured.get(cid) or {}
+        self.unconfigured[cid] = {
+            "id": chat["id"], "title": chat.get("title"), "type": chat.get("type"),
+            "first_seen": prev.get("first_seen") or int(time.time()),
+            "last_seen": int(time.time()),
+            "messages": int(prev.get("messages", 0)) + 1,
+        }
+        if len(self.unconfigured) > 20:  # bounded; oldest sighting drops out
+            oldest = min(self.unconfigured, key=lambda k: self.unconfigured[k]["last_seen"])
+            del self.unconfigured[oldest]
 
     def count(self, direction: str) -> None:
         now = int(time.time())
@@ -199,7 +217,8 @@ class State:
             {
                 "tg_offset": self.tg_offset,
                 "mx_seen": self.mx_seen[-MX_SEEN_LIMIT:],
-                "stats": {**self.stats, "buckets": {str(k): v for k, v in self.buckets.items()}},
+                "stats": {**self.stats, "buckets": {str(k): v for k, v in self.buckets.items()},
+                          "unconfigured": self.unconfigured},
             }
         )
         tmp = STATE_PATH.with_suffix(".tmp")
@@ -304,13 +323,29 @@ async def mx_send_relay(mx_client, room: str, sender: str, text: str) -> None:
     log("mx", f"-> {sender}: {text!r}")
 
 
-async def tg_send_relay(tg_client, tg_chat_id: int, sender: str, text: str) -> None:
-    """Send one relayed line into the Telegram group.
+async def tg_send_relay(tg_client, tg_chat_ids, sender: str, text: str) -> None:
+    """Send one relayed line into EVERY configured Telegram group.
+
+    Hub-and-spoke: a Matrix message fans out to all groups. Groups do not see
+    each other, because a message the relay posts INTO Matrix is dropped by the
+    Matrix poller as its own — so it never continues on to a sibling group.
 
     HTML, not Markdown: the Bot API does not auto-parse (Telethon did), and a
-    body containing `_` or `*` would make Telegram reject a Markdown parse."""
-    await tg_send_message(tg_client, tg_chat_id, tg_relay_html(sender, text))
-    log("tg", f"-> {sender}: {text!r}")
+    body containing `_` or `*` would make Telegram reject a Markdown parse.
+
+    A send that fails to ONE group raises after the others are attempted, so a
+    single bad chat can't silently stop delivery to the rest — the caller then
+    leaves the cursor put and the whole line is retried."""
+    body = tg_relay_html(sender, text)
+    failures = []
+    for chat_id in tg_chat_ids:
+        try:
+            await tg_send_message(tg_client, chat_id, body)
+        except Exception as exc:
+            failures.append(f"{chat_id}: {type(exc).__name__}: {exc}")
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    log("tg", f"-> {len(tg_chat_ids)} chat(s) {sender}: {text!r}")
 
 
 async def _mx_sync(mx_client, room: str, *, full_state: bool = False, timeout: int = MX_SYNC_TIMEOUT):
@@ -341,7 +376,7 @@ async def _mx_sync(mx_client, room: str, *, full_state: bool = False, timeout: i
     )
 
 
-async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state, *, timeout=MX_SYNC_TIMEOUT):
+async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_ids, state, *, timeout=MX_SYNC_TIMEOUT):
     """Sync once and relay every new non-self Matrix message in the bridge
     room to Telegram. State is saved after each relay so a kill never
     double-delivers."""
@@ -379,7 +414,7 @@ async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
             continue  # edit / reaction / redaction / unsupported — v1 skips
         name = await _mx_displayname(mx_client, sender)
         try:
-            await tg_send_relay(tg_client, tg_chat_id, name, body)
+            await tg_send_relay(tg_client, tg_chat_ids, name, body)
         except Exception as exc:
             log("tg", f"send failed for {event_id}: {type(exc).__name__}: {exc}")
             # Do not mark the event until delivery succeeds. The next pass
@@ -391,7 +426,7 @@ async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
     state.save()
 
 
-async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
+async def tg_poll_once(tg_client, tg_chat_ids, chat_titles, mx_client, room, state):
     """Long-poll getUpdates once and relay every new Telegram message to Matrix.
 
     No loop guard is needed here: the Bot API never delivers a bot its own
@@ -404,7 +439,7 @@ async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
     offset behind, so Telegram redelivers the update on the next poll and the
     message is retried — including across a restart."""
     updates = await tg_get_updates(
-        tg_client, offset=state.tg_offset, chat_id=tg_chat_id, limit=TG_POLL_LIMIT
+        tg_client, offset=state.tg_offset, chat_ids=tg_chat_ids, limit=TG_POLL_LIMIT
     )
     if not updates:
         return
@@ -415,8 +450,10 @@ async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
         state.save()
         log("tg", f"first start: offset set to {state.tg_offset}, backlog skipped")
         return
-    for update_id, msg in updates:  # getUpdates returns oldest -> newest
+    for update_id, msg, seen in updates:  # getUpdates returns oldest -> newest
         if msg is None:  # another chat, or a non-message update — step over it
+            if seen and seen.get("id") is not None:
+                state.note_unconfigured(seen)
             state.tg_offset = max(state.tg_offset, update_id + 1)
             continue
         text = _tg_text(msg)
@@ -424,6 +461,13 @@ async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
             state.tg_offset = max(state.tg_offset, update_id + 1)
             continue
         sender = tg_sender_name(msg)
+        # With several groups feeding one room, "Andrew: hi" is ambiguous —
+        # Matrix readers cannot tell which group it came from. Qualify the
+        # sender only when that ambiguity actually exists.
+        if len(tg_chat_ids) > 1:
+            origin = (msg.get("chat") or {}).get("id")
+            title = chat_titles.get(origin) or str(origin)
+            sender = f"{sender} ({title})"
         try:
             await mx_send_relay(mx_client, room, sender, text)
         except Exception as exc:
@@ -461,18 +505,20 @@ def public_summary(state, started_at) -> dict:
             "uptime_s": int(time.time() - started_at)}
 
 
-def detail_summary(state, started_at, room, tg_chat_id, me, bot_mxid,
-                   device_id) -> dict:
+def detail_summary(state, started_at, room, tg_chat_ids, me, bot_mxid,
+                   device_id, chat_titles=None) -> dict:
     st = state.stats
     return {
         "ok": True,
         "uptime_s": int(time.time() - started_at),
+        "topology": "hub-and-spoke: every group mirrors with the room; groups do not see each other",
         "channels": [{
             "matrix_room": room,
-            "telegram_chat": tg_chat_id,
+            "telegram_chat": cid,
+            "telegram_title": (chat_titles or {}).get(cid),
             "direction": "bidirectional",
             "scope": "plain text; media relayed as a placeholder",
-        }],
+        } for cid in tg_chat_ids],
         "identities": {
             "matrix_user": bot_mxid,
             "matrix_device": device_id,
@@ -485,6 +531,8 @@ def detail_summary(state, started_at, room, tg_chat_id, me, bot_mxid,
             "total": st["tg_to_mx"] + st["mx_to_tg"],
         },
         "cursors": {"tg_offset": state.tg_offset, "mx_seen": len(state.mx_seen)},
+        "unconfigured_chats_seen": sorted(
+            state.unconfigured.values(), key=lambda c: -c["last_seen"]),
         "first_start": st["first_start"],
         "last_relay": st["last_relay"],
         "last_relay_ago": _ago(st["last_relay"]),
@@ -526,6 +574,9 @@ h2{font-size:.95rem;margin:0 0 .15rem;font-weight:600}
 .tile .k{display:block;color:var(--mut);font-size:.8rem;margin-top:.15rem}
 svg{display:block;overflow:visible}
 .tick{fill:var(--mut);font-size:10px}
+table{border-collapse:collapse;width:100%;margin-top:.5rem;font-size:.9rem}
+th{text-align:left;color:var(--mut);font-weight:500;padding:.35rem .6rem .35rem 0;border-bottom:1px solid var(--line)}
+td{padding:.35rem .6rem .35rem 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 """
 
 
@@ -609,7 +660,7 @@ def activity_svg(series) -> str:
             f'preserveAspectRatio="none">{axis}{"".join(bars)}{peak_label}{ends}</svg>')
 
 
-def landing_html(state, started_at) -> str:
+def landing_html(state, started_at, n_channels: int = 1) -> str:
     up = int(time.time() - started_at)
     series = hourly_series(state, 24)
     d1, d7 = window_total(state, 24), window_total(state, 24 * 7)
@@ -619,13 +670,13 @@ def landing_html(state, started_at) -> str:
         '<p class=empty>No messages in the last 24 hours.</p>' + activity_svg(series))
     body = f"""
 <h1>Matrix &harr; Telegram relay</h1>
-<p class=sub>A small bridge that mirrors messages between a Matrix room and a Telegram group.</p>
+<p class=sub>A small bridge that mirrors messages between a Matrix room and {'a Telegram group' if n_channels == 1 else f'{n_channels} Telegram groups'}.</p>
 
 <div class=tiles>
   <div class=tile><span class=n>{total:,}</span><span class=k>messages routed</span></div>
   <div class=tile><span class=n>{d1:,}</span><span class=k>last 24 hours</span></div>
   <div class=tile><span class=n>{d7:,}</span><span class=k>last 7 days</span></div>
-  <div class=tile><span class=n>1</span><span class=k>channel bridged</span></div>
+  <div class=tile><span class=n>{n_channels}</span><span class=k>channel{'' if n_channels == 1 else 's'} bridged</span></div>
 </div>
 
 <div class=card>
@@ -667,7 +718,6 @@ UNAUTH_HTML = _page("Not authorized", """
 
 
 def detail_html(d: dict) -> str:
-    ch = d["channels"][0]
     ids = d["identities"]
     r = d["relayed"]
     up = d["uptime_s"]
@@ -683,13 +733,18 @@ def detail_html(d: dict) -> str:
   </dl>
 </div>
 <div class=card>
-  <h2 style="font-size:1rem;margin:0 0 .75rem">Channel maintained</h2>
+  <h2 style="font-size:1rem;margin:0 0 .35rem">Channels maintained</h2>
+  <p class=cap>{html.escape(d.get('topology',''))}</p>
   <dl>
-    <dt>Matrix room</dt><dd><code>{html.escape(str(ch['matrix_room']))}</code></dd>
-    <dt>Telegram chat</dt><dd><code>{html.escape(str(ch['telegram_chat']))}</code></dd>
-    <dt>Direction</dt><dd>{ch['direction']}</dd>
-    <dt>Scope</dt><dd>{ch['scope']}</dd>
+    <dt>Matrix room</dt><dd><code>{html.escape(str(d['channels'][0]['matrix_room']))}</code></dd>
   </dl>
+  <table>
+    <tr><th>Telegram group</th><th>chat id</th><th>scope</th></tr>
+    {"".join(
+      f"<tr><td>{html.escape(str(c.get('telegram_title') or '—'))}</td>"
+      f"<td><code>{html.escape(str(c['telegram_chat']))}</code></td>"
+      f"<td>{html.escape(c['scope'])}</td></tr>" for c in d['channels'])}
+  </table>
 </div>
 <div class=card>
   <h2 style="font-size:1rem;margin:0 0 .75rem">Messages relayed</h2>
@@ -709,6 +764,17 @@ def detail_html(d: dict) -> str:
     <dt>Matrix dedup ring</dt><dd>{d['cursors']['mx_seen']} event ids</dd>
   </dl>
 </div>
+{"".join([
+  '<div class=card><h2 style="font-size:1rem;margin:0 0 .35rem">Unconfigured chats seen</h2>'
+  '<p class=cap>The bot is in these but the fixtures do not name them, so nothing is bridged. '
+  'Add an id to <code>telegram_chat_ids</code> to bridge it.</p>'
+  '<table><tr><th>group</th><th>chat id</th><th>msgs</th><th>last seen</th></tr>'
+  + "".join(
+      f"<tr><td>{html.escape(str(c.get('title') or '—'))}</td>"
+      f"<td><code>{c['id']}</code></td><td>{c['messages']}</td>"
+      f"<td>{_ago(c['last_seen'])}</td></tr>" for c in d['unconfigured_chats_seen'])
+  + '</table></div>'
+]) if d.get('unconfigured_chats_seen') else ""}
 <p><a href="./">&larr; Public page</a></p>
 """
     return _page("Relay detail", body)
@@ -717,7 +783,7 @@ def detail_html(d: dict) -> str:
 async def run(args) -> int:
     started_at = time.time()
     creds, room = mx_load_config()
-    tg_chat_id = tg_load_chat_id()
+    tg_chat_ids = tg_load_chat_ids()
     bot_mxid = creds["user_id"]
     state = State.load()
     state.stats["restarts"] += 1
@@ -750,7 +816,7 @@ async def run(args) -> int:
 
     log(
         "relay",
-        f"start room={room} tg_chat={tg_chat_id} bot={bot_mxid} tg_bot=@{me['username']}",
+        f"start room={room} tg_chats={tg_chat_ids} bot={bot_mxid} tg_bot=@{me['username']}",
     )
 
     # First-ever Matrix start: the relay keeps its OWN /sync cursor
@@ -765,9 +831,9 @@ async def run(args) -> int:
     if args.once:
         # One pass each side with a short MX window, then a clean exit.
         try:
-            await tg_poll_once(tg_client, tg_chat_id, mx_client, room, state)
+            await tg_poll_once(tg_client, tg_chat_ids, chat_titles, mx_client, room, state)
             await mx_relay_once(
-                mx_client, room, bot_mxid, tg_client, tg_chat_id, state, timeout=2000
+                mx_client, room, bot_mxid, tg_client, tg_chat_ids, state, timeout=2000
             )
         finally:
             state.save()
@@ -797,7 +863,7 @@ async def run(args) -> int:
                 # getUpdates long-polls, so this blocks until traffic arrives or
                 # the poll window closes. Re-poll immediately on success; only
                 # back off after a failure.
-                await tg_poll_once(tg_client, tg_chat_id, mx_client, room, state)
+                await tg_poll_once(tg_client, tg_chat_ids, chat_titles, mx_client, room, state)
                 continue
             except Exception as exc:
                 log("tg", f"poll error: {type(exc).__name__}: {exc}")
@@ -810,7 +876,7 @@ async def run(args) -> int:
         while not stop.is_set():
             try:
                 await mx_relay_once(
-                    mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
+                    mx_client, room, bot_mxid, tg_client, tg_chat_ids, state,
                     timeout=MX_SYNC_TIMEOUT,
                 )
             except Exception as exc:
@@ -842,7 +908,7 @@ async def run(args) -> int:
             return hmac.compare_digest(supplied, status_token)
 
         async def _index(_req):
-            return web.Response(text=landing_html(state, started_at),
+            return web.Response(text=landing_html(state, started_at, len(tg_chat_ids)),
                                 content_type="text/html")
 
         async def _health_json(_req):
@@ -856,8 +922,8 @@ async def run(args) -> int:
                      "hint": "GET /detail?token=… or Authorization: Bearer …"},
                     status=401)
             return web.json_response(detail_summary(
-                state, started_at, room, tg_chat_id, me, bot_mxid,
-                creds["device_id"]))
+                state, started_at, room, tg_chat_ids, me, bot_mxid,
+                creds["device_id"], chat_titles))
 
         async def _detail_html(req):
             if not _authed(req):
@@ -865,8 +931,8 @@ async def run(args) -> int:
                                     content_type="text/html")
             return web.Response(
                 text=detail_html(detail_summary(
-                    state, started_at, room, tg_chat_id, me, bot_mxid,
-                    creds["device_id"])),
+                    state, started_at, room, tg_chat_ids, me, bot_mxid,
+                    creds["device_id"], chat_titles)),
                 content_type="text/html")
 
         app = web.Application()

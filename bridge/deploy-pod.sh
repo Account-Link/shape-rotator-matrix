@@ -84,9 +84,13 @@ FIXTURES="$HOME/.teleport-travel/test-fixtures.json"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 assert str(d.get("matrix_room_id","")).startswith("!"), "bad matrix_room_id"
-assert d.get("telegram_chat_id"), "missing telegram_chat_id"' "$FIXTURES" || die "fixtures invalid"
+assert d.get("telegram_chat_ids") or d.get("telegram_chat_id"), "missing telegram chat id(s)"' "$FIXTURES" || die "fixtures invalid"
 ROOM="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["matrix_room_id"])' "$FIXTURES")"
-CHAT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["telegram_chat_id"])' "$FIXTURES")"
+CHAT="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+ids=d.get("telegram_chat_ids") or [d["telegram_chat_id"]]
+print(",".join(str(int(x)) for x in ids))' "$FIXTURES")"
 
 echo "deploy-pod: $NAME -> $CVM"
 echo "  room=$ROOM  chat=$CHAT  matrix_user=$MATRIX_USER"
