@@ -521,6 +521,11 @@ async def run(args) -> int:
                     "room": room,
                     "tg_chat": tg_chat_id,
                     "tg_bot": me["username"],
+                    # Which Matrix device this instance is using. Needed to tell
+                    # whether the LIVE device is the cross-signed one after a
+                    # re-mint — /keys/query alone can't say which is in use.
+                    "mx_user": bot_mxid,
+                    "mx_device": creds["device_id"],
                     "tg_offset": state.tg_offset,
                     "mx_seen": len(state.mx_seen),
                     "uptime_s": int(time.time() - started_at),
