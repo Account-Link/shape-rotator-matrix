@@ -118,6 +118,8 @@ TG_ERROR_BACKOFF = 3.0
 TG_POLL_LIMIT = 100
 # How many Matrix event_ids to remember for dedup.
 MX_SEEN_LIMIT = 500
+# Hours of activity history retained (8 days, so a 7-day window is always full).
+BUCKET_RETENTION_H = 24 * 8
 
 # v1 media placeholders (no re-upload yet).
 _TG_MEDIA_PLACEHOLDER = {
@@ -150,6 +152,10 @@ class State:
         # Lifetime counters, persisted alongside the cursors so a restart or a
         # redeploy doesn't reset the picture of what this relay has carried.
         s = dict(stats or {})
+        # Hourly activity buckets {hour_epoch: count}. Aggregate counts only —
+        # no sender, no content, no per-message timestamps. Enough to show the
+        # service is used without describing who said what to whom.
+        self.buckets = {int(k): int(v) for k, v in (s.get("buckets") or {}).items()}
         self.stats = {
             "tg_to_mx": int(s.get("tg_to_mx", 0)),
             "mx_to_tg": int(s.get("mx_to_tg", 0)),
@@ -159,8 +165,15 @@ class State:
         }
 
     def count(self, direction: str) -> None:
+        now = int(time.time())
         self.stats[direction] = self.stats.get(direction, 0) + 1
-        self.stats["last_relay"] = int(time.time())
+        self.stats["last_relay"] = now
+        hour = now // 3600
+        self.buckets[hour] = self.buckets.get(hour, 0) + 1
+        # Keep a little more than the 7-day window so it is always complete.
+        cutoff = hour - BUCKET_RETENTION_H
+        for h in [h for h in self.buckets if h < cutoff]:
+            del self.buckets[h]
 
     @classmethod
     def load(cls) -> "State":
@@ -186,7 +199,7 @@ class State:
             {
                 "tg_offset": self.tg_offset,
                 "mx_seen": self.mx_seen[-MX_SEEN_LIMIT:],
-                "stats": self.stats,
+                "stats": {**self.stats, "buckets": {str(k): v for k, v in self.buckets.items()}},
             }
         )
         tmp = STATE_PATH.with_suffix(".tmp")
@@ -479,9 +492,14 @@ def detail_summary(state, started_at, room, tg_chat_id, me, bot_mxid,
 
 
 _CSS = """
-:root{--bg:#fbfbfa;--fg:#1a1a19;--mut:#6b6b66;--line:#e4e4e0;--card:#fff;--ok:#0f7a52}
+/* Series hue is categorical slot 1, validated against both surfaces with the
+   dataviz palette validator (lightness band, chroma floor, >=3:1 contrast).
+   Dark is a SELECTED step from the same ramp, not an automatic flip. */
+:root{--bg:#fcfcfb;--fg:#1a1a19;--mut:#6b6b66;--line:#e4e4e0;--card:#fff;--ok:#0f7a52;
+--series-1:#2a78d6;--axis:#d8d8d4;--zero:#c9c9c4}
 @media(prefers-color-scheme:dark){:root:not([data-theme=light]){
---bg:#16161a;--fg:#ececf0;--mut:#9a9aa4;--line:#2c2c33;--card:#1e1e24;--ok:#4ade9f}}
+--bg:#16161a;--fg:#ececf0;--mut:#9a9aa4;--line:#2c2c33;--card:#1e1e24;--ok:#4ade9f;
+--series-1:#3987e5;--axis:#3a3a42;--zero:#4a4a52}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 .wrap{max-width:44rem;margin:0 auto;padding:3rem 1.25rem 4rem}
@@ -497,6 +515,17 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
 .node{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:.3rem .6rem;color:var(--fg);font-weight:600}
 footer{color:var(--mut);font-size:.85rem;margin-top:2rem;border-top:1px solid var(--line);padding-top:1rem}
 a{color:inherit}
+h2{font-size:.95rem;margin:0 0 .15rem;font-weight:600}
+.cap{color:var(--mut);font-size:.85rem;margin:0 0 .9rem}
+.empty{color:var(--mut);font-size:.85rem;margin:0 0 .5rem}
+/* Stat tiles: the headline numbers are the point, so they get hero weight and
+   the label recedes. Text wears text tokens, never the series color. */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr));gap:.75rem;margin:0 0 1rem}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.9rem 1rem}
+.tile .n{display:block;font-size:1.6rem;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.tile .k{display:block;color:var(--mut);font-size:.8rem;margin-top:.15rem}
+svg{display:block;overflow:visible}
+.tick{fill:var(--mut);font-size:10px}
 """
 
 
@@ -507,30 +536,121 @@ def _page(title: str, body: str) -> str:
             f"<body><div class=wrap>{body}</div></body></html>")
 
 
+def window_total(state, hours: int) -> int:
+    """Messages routed in the last `hours`, from the hourly buckets."""
+    now_h = int(time.time()) // 3600
+    return sum(c for h, c in state.buckets.items() if h > now_h - hours)
+
+
+def hourly_series(state, hours: int = 24):
+    """[(hour_epoch, count)] for the last `hours`, oldest first, gaps as 0."""
+    now_h = int(time.time()) // 3600
+    return [(h, state.buckets.get(h, 0)) for h in range(now_h - hours + 1, now_h + 1)]
+
+
+def _bar_path(x: float, y: float, w: float, h: float, r: float = 4.0) -> str:
+    """Column with rounded top corners, square where it meets the baseline.
+
+    marks-and-anatomy: round the DATA END only — a bar rounded at the baseline
+    reads as floating and misstates where zero is."""
+    r = min(r, w / 2, h)
+    if h <= 0:
+        return ""
+    if h <= r:
+        return f"M{x},{y + h}L{x},{y}L{x + w},{y}L{x + w},{y + h}Z"
+    return (f"M{x},{y + h}L{x},{y + r}Q{x},{y} {x + r},{y}"
+            f"L{x + w - r},{y}Q{x + w},{y} {x + w},{y + r}L{x + w},{y + h}Z")
+
+
+def activity_svg(series) -> str:
+    """Hourly column chart of the last 24h. One series, so no legend — the
+    heading names it. Native <title> tooltips per bar (interaction.md: a bar
+    chart ships per-mark hover)."""
+    W, H, PAD_B = 640.0, 108.0, 16.0
+    n = len(series) or 1
+    slot = W / n
+    gap = 2.0                      # 2px surface gap between adjacent bars
+    bw = max(3.0, slot - gap)
+    peak = max((c for _, c in series), default=0)
+    plot_h = H - PAD_B
+    bars = []
+    for i, (hour, c) in enumerate(series):
+        x = i * slot + gap / 2
+        if peak > 0 and c > 0:
+            bh = max(3.0, (c / peak) * (plot_h - 6))
+        else:
+            bh = 0.0
+        label = time.strftime("%H:00 UTC", time.gmtime(hour * 3600))
+        tip = f"{label} — {c} message{'' if c == 1 else 's'}"
+        if bh > 0:
+            bars.append(f'<path d="{_bar_path(x, plot_h - bh, bw, bh)}" fill="var(--series-1)">'
+                        f'<title>{tip}</title></path>')
+        else:
+            # Zero still gets a hit target and a tick, so an empty hour is
+            # legible as "nothing happened" rather than as missing data.
+            bars.append(f'<rect x="{x:.1f}" y="{plot_h - 1.5:.1f}" width="{bw:.1f}" height="1.5" '
+                        f'fill="var(--zero)"><title>{tip}</title></rect>')
+    axis = (f'<line x1="0" y1="{plot_h:.1f}" x2="{W}" y2="{plot_h:.1f}" '
+            f'stroke="var(--axis)" stroke-width="1"/>')
+    # One direct label, on the peak only — it gives the chart a scale without a
+    # y-axis, and marks-and-anatomy forbids a number on every bar.
+    peak_label = ""
+    if peak > 0:
+        i = max(range(len(series)), key=lambda j: series[j][1])
+        bh = max(3.0, (series[i][1] / peak) * (plot_h - 6))
+        cx = i * slot + gap / 2 + bw / 2
+        anchor = "start" if i < 2 else ("end" if i > n - 3 else "middle")
+        peak_label = (f'<text x="{cx:.1f}" y="{plot_h - bh - 4:.1f}" class="tick" '
+                      f'text-anchor="{anchor}">{peak}</text>')
+    ends = (f'<text x="0" y="{H - 2:.0f}" class="tick">24h ago</text>'
+            f'<text x="{W}" y="{H - 2:.0f}" class="tick" text-anchor="end">now</text>')
+    return (f'<svg viewBox="0 -10 {W:.0f} {H + 10:.0f}" width="100%" height="{H + 10:.0f}" '
+            f'role="img" aria-label="Messages routed per hour over the last 24 hours" '
+            f'preserveAspectRatio="none">{axis}{"".join(bars)}{peak_label}{ends}</svg>')
+
+
 def landing_html(state, started_at) -> str:
     up = int(time.time() - started_at)
+    series = hourly_series(state, 24)
+    d1, d7 = window_total(state, 24), window_total(state, 24 * 7)
+    total = state.stats["tg_to_mx"] + state.stats["mx_to_tg"]
+    peak = max((c for _, c in series), default=0)
+    chart = activity_svg(series) if peak else (
+        '<p class=empty>No messages in the last 24 hours.</p>' + activity_svg(series))
     body = f"""
 <h1>Matrix &harr; Telegram relay</h1>
-<p class=sub>A small bridge that mirrors messages between one Matrix room and one Telegram group.</p>
-<div class=card>
-  <p class=pill><span class=dot></span>Running</p>
-  <dl><dt>Uptime</dt><dd>{up // 3600}h {(up % 3600) // 60}m</dd></dl>
+<p class=sub>A small bridge that mirrors messages between a Matrix room and a Telegram group.</p>
+
+<div class=tiles>
+  <div class=tile><span class=n>{total:,}</span><span class=k>messages routed</span></div>
+  <div class=tile><span class=n>{d1:,}</span><span class=k>last 24 hours</span></div>
+  <div class=tile><span class=n>{d7:,}</span><span class=k>last 7 days</span></div>
+  <div class=tile><span class=n>1</span><span class=k>channel bridged</span></div>
 </div>
+
 <div class=card>
+  <h2>Messages routed per hour</h2>
+  <p class=cap>Last 24 hours &middot; hover a bar for its count</p>
+  {chart}
+</div>
+
+<div class=card>
+  <p class=pill><span class=dot></span>Running &middot; up {up // 3600}h {(up % 3600) // 60}m</p>
   <p class=flow><span class=node>Matrix</span> &harr; <span class=node>relay</span> &harr; <span class=node>Telegram</span></p>
-  <p>Each message posted on one side is re-posted on the other, attributed to
-  its original sender. It relays plain text; images and files become a short
+  <p>Each message posted on one side is re-posted on the other, attributed to its
+  original sender. It relays plain text; images and files become a short
   placeholder rather than being re-uploaded. Edits, deletions, replies and
   reactions are not mirrored.</p>
   <p>The Matrix side is end-to-end encrypted, so the relay holds its own device
-  keys and decrypts only in memory to forward. Messages are not stored: it keeps
-  a position marker per side so a restart resumes without duplicating.</p>
+  keys and decrypts only in memory to forward. Messages are not stored &mdash; it
+  keeps a position marker per side so a restart resumes without duplicating.</p>
 </div>
+
 <div class=card>
-  <p><strong>Which room and group?</strong> Not shown here. This page is public,
-  so it deliberately omits the venues, the bot accounts, and how much traffic
-  has crossed.</p>
-  <p class=sub style="margin:0">Operators: <code>/detail.html?token=…</code></p>
+  <p><strong>Which room and group?</strong> Not shown here. The counts above are
+  totals only: no senders, no content, no per-message timestamps, and nothing
+  naming the venues or the bot accounts.</p>
+  <p class=sub style="margin:0">Operators: <code>/detail.html?token=&hellip;</code></p>
 </div>
 <footer>One pairing per instance, fixed in configuration. No public endpoint can change it.</footer>
 """
