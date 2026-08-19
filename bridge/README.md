@@ -1,12 +1,22 @@
 # bridge/ — Matrix &harr; Telegram relay for Shape OS coordination
 
 One `runtime: image` tenant on a tee-daemon pod (`pod.dstack.soc1024.com/mx-tg-relay/`),
-mirroring plain-text messages between the ONE Matrix room and ONE Telegram group named
-in the fixture pair. The Telegram credential is a BotFather **bot token** — no user
+mirroring plain-text messages between ONE Matrix room and the Telegram group(s) named
+in the fixtures. The Telegram credential is a BotFather **bot token** — no user
 session, no `api_id`/`api_hash`, works from any host.
 
 Production pairing is an operator-only config change — there is no flag to override
 either target, by design.
+
+**Topology is hub-and-spoke.** A Matrix message fans out to every configured group, and
+each group mirrors into the room, but the groups do **not** see each other: a message the
+relay posts into Matrix is dropped by the Matrix poller as its own, so it never continues
+on to a sibling group. When more than one group feeds the room the source group is
+appended to the sender (`Andrew (Ops): hi`), since otherwise Matrix readers cannot tell
+which group a line came from.
+
+One `getUpdates` stream serves every chat the bot is in, so additional groups need no
+extra polling, token, or cursor.
 
 | file | role |
 | --- | --- |
@@ -63,7 +73,7 @@ means a re-minted device and a lost megolm session — permanently undecryptable
 
 | path (in `/data`) | purpose |
 | --- | --- |
-| `test-fixtures.json` | the ONLY `matrix_room_id` + `telegram_chat_id` bridge code may touch |
+| `test-fixtures.json` | the ONLY `matrix_room_id` + `telegram_chat_ids` bridge code may touch |
 | `telegram-bot-token` | BotFather token (volume copy wins after first boot) |
 | `creds.json` | `user_id`, `access_token`, `device_id`, `homeserver` (minted on first boot) |
 | `store/crypto.db` | OlmMachine identity — never regenerated under the same `device_id` |
@@ -77,11 +87,23 @@ The local CLI uses the same layout under `~/.shape-bridge-bot/` + `~/.teleport-t
 
 Operator-only, in one of two ways:
 
-- **First boot:** set `MATRIX_ROOM_ID` + `TELEGRAM_CHAT_ID` in the deploy env;
-  `entrypoint.sh` seeds them into `/data/test-fixtures.json` once.
-- **Re-pairing a live deployment:** edit `/data/test-fixtures.json` in the volume (or
-  wipe the volume and redeploy with new env). After first boot the volume's copy wins,
-  so a redeploy with different env does NOT silently re-pair — that is deliberate.
+- **First boot:** set `MATRIX_ROOM_ID` + `TELEGRAM_CHAT_ID` (comma-separated for several
+  groups) in the deploy env; `entrypoint.sh` seeds them into `/data/test-fixtures.json`.
+- **Adding or removing a GROUP later:** change `TELEGRAM_CHAT_ID` in the deploy env and
+  redeploy. `entrypoint.sh` reconciles the list into the volume and logs
+  `RE-PAIRED telegram chats: [...] -> [...]`. Env only changes via a deploy, so this is
+  already an operator action — but it is logged loudly rather than done quietly.
+- **Changing the MATRIX ROOM:** not possible this way, on purpose. A room mismatch
+  between env and volume **fails the boot**, because re-pointing a live device strands
+  the megolm sessions it holds. Wipe the volume to re-pair deliberately, accepting that
+  the device is re-minted and cannot read the old room's history.
+
+### Finding a new group's chat id
+
+A bot cannot read history, and the relay consumes then discards updates from chats the
+fixtures don't name — so a new group's id would otherwise be unknowable. Sightings are
+recorded instead: add the bot to the group, post once, and the chat shows up under
+**Unconfigured chats seen** on `/detail.html?token=…` with its id and title.
 
 Then invite the bridge bot (`@shape-bridge:mtrx.shaperotator.xyz`) to the Matrix room
 and the Telegram bot to the group, and cross-sign the new device if the store was wiped
