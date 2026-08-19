@@ -20,11 +20,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libolm3 \
  && rm -rf /var/lib/apt/lists/*
 
+# Keep this list in sync with tests/Dockerfile. mautrix[e2be] does NOT pull in
+# unpaddedbase64 or cryptography, but mautrix.crypto imports them at module
+# load -- trimming either turns into a container that crash-loops on import
+# before it can bind a port, which surfaces only as a 502/500 from ingress.
 RUN pip install --no-cache-dir \
         aiohttp \
+        cryptography \
         'mautrix[e2be]' \
         aiosqlite \
         asyncpg \
+        unpaddedbase64 \
+        base58 \
+        pyaes \
+        pycryptodome \
         python-olm
 
 WORKDIR /app

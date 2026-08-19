@@ -93,6 +93,7 @@ print(json.dumps({
     "runtime": "image",
     "image": digest,
     "image_port": 8080,
+    "oci_runtime": os.environ.get("OCI_RUNTIME", "runc"),
     "volumes": [{"name": f"{name}-data", "mount": "/data"}],
     "env": {
         "TELEGRAM_BOT_TOKEN": os.environ["TG_TOKEN"],
