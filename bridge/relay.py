@@ -60,6 +60,7 @@ Usage:
 """
 import argparse
 import asyncio
+import hmac
 import html
 import json
 import os
@@ -140,12 +141,26 @@ class State:
     """Durable relay cursors. Persisted atomically after every relay so a kill
     between messages cannot double-relay."""
 
-    def __init__(self, tg_offset: int, mx_seen):
+    def __init__(self, tg_offset: int, mx_seen, stats=None):
         # Next getUpdates offset: one past the highest update_id confirmed.
         # Sending it back to Telegram is what durably acknowledges everything
         # below it, so this is the Telegram-side restart cursor.
         self.tg_offset = tg_offset
         self.mx_seen = list(mx_seen)
+        # Lifetime counters, persisted alongside the cursors so a restart or a
+        # redeploy doesn't reset the picture of what this relay has carried.
+        s = dict(stats or {})
+        self.stats = {
+            "tg_to_mx": int(s.get("tg_to_mx", 0)),
+            "mx_to_tg": int(s.get("mx_to_tg", 0)),
+            "first_start": s.get("first_start") or int(time.time()),
+            "last_relay": s.get("last_relay"),
+            "restarts": int(s.get("restarts", 0)),
+        }
+
+    def count(self, direction: str) -> None:
+        self.stats[direction] = self.stats.get(direction, 0) + 1
+        self.stats["last_relay"] = int(time.time())
 
     @classmethod
     def load(cls) -> "State":
@@ -158,10 +173,11 @@ class State:
                 return cls(
                     tg_offset=int(data.get("tg_offset", 0)),
                     mx_seen=list(data.get("mx_seen", [])),
+                    stats=data.get("stats") or {},
                 )
             except (TypeError, ValueError) as e:
                 raise SystemExit(f"relay state {STATE_PATH} corrupt: {e}")
-        return cls(tg_offset=0, mx_seen=[])
+        return cls(tg_offset=0, mx_seen=[], stats={})
 
     def save(self) -> None:
         """Atomic write (tmp + rename) — never a half-written file on crash."""
@@ -170,6 +186,7 @@ class State:
             {
                 "tg_offset": self.tg_offset,
                 "mx_seen": self.mx_seen[-MX_SEEN_LIMIT:],
+                "stats": self.stats,
             }
         )
         tmp = STATE_PATH.with_suffix(".tmp")
@@ -356,6 +373,7 @@ async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
             # must retry a failed send, including after a process restart.
             continue
         state.mark_mx(event_id)
+        state.count("mx_to_tg")
         state.save()
     state.save()
 
@@ -399,8 +417,181 @@ async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
             log("mx", f"send failed for tg update={update_id}: {type(exc).__name__}: {exc}")
             break  # stop the pass; offset stays put so Telegram redelivers
         state.tg_offset = max(state.tg_offset, update_id + 1)
+        state.count("tg_to_mx")
         state.save()
     state.save()
+
+
+# ---------------------------------------------------------------------------
+# HTTP surface. Two audiences, one listener.
+#
+# The pod's ingress proxies this path-based with NO auth in front of it, so "/"
+# and "/health" are effectively world-readable. They therefore say nothing about
+# WHICH venues are bridged, WHO the bot is, or how much traffic there is —
+# message counts are metadata about a private room. Everything identifying sits
+# behind RELAY_STATUS_TOKEN on /detail.
+# ---------------------------------------------------------------------------
+
+def _ago(ts) -> str:
+    if not ts:
+        return "never"
+    d = max(0, int(time.time()) - int(ts))
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if d >= size:
+            return f"{d // size}{unit} ago"
+    return f"{d}s ago"
+
+
+def public_summary(state, started_at) -> dict:
+    """Liveness only. No venue, account, device, or traffic volume."""
+    return {"ok": True, "service": "matrix-telegram-relay",
+            "uptime_s": int(time.time() - started_at)}
+
+
+def detail_summary(state, started_at, room, tg_chat_id, me, bot_mxid,
+                   device_id) -> dict:
+    st = state.stats
+    return {
+        "ok": True,
+        "uptime_s": int(time.time() - started_at),
+        "channels": [{
+            "matrix_room": room,
+            "telegram_chat": tg_chat_id,
+            "direction": "bidirectional",
+            "scope": "plain text; media relayed as a placeholder",
+        }],
+        "identities": {
+            "matrix_user": bot_mxid,
+            "matrix_device": device_id,
+            "telegram_bot": "@" + me["username"],
+            "telegram_bot_id": me["id"],
+        },
+        "relayed": {
+            "telegram_to_matrix": st["tg_to_mx"],
+            "matrix_to_telegram": st["mx_to_tg"],
+            "total": st["tg_to_mx"] + st["mx_to_tg"],
+        },
+        "cursors": {"tg_offset": state.tg_offset, "mx_seen": len(state.mx_seen)},
+        "first_start": st["first_start"],
+        "last_relay": st["last_relay"],
+        "last_relay_ago": _ago(st["last_relay"]),
+    }
+
+
+_CSS = """
+:root{--bg:#fbfbfa;--fg:#1a1a19;--mut:#6b6b66;--line:#e4e4e0;--card:#fff;--ok:#0f7a52}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
+--bg:#16161a;--fg:#ececf0;--mut:#9a9aa4;--line:#2c2c33;--card:#1e1e24;--ok:#4ade9f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:44rem;margin:0 auto;padding:3rem 1.25rem 4rem}
+h1{font-size:1.5rem;margin:0 0 .25rem;letter-spacing:-.01em}
+.sub{color:var(--mut);margin:0 0 2rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.1rem 1.25rem;margin:0 0 1rem}
+.pill{display:inline-flex;align-items:center;gap:.45rem;font-weight:600;color:var(--ok)}
+.dot{width:.5rem;height:.5rem;border-radius:50%;background:var(--ok)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:.4rem 1.25rem;margin:0}
+dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
+.flow{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;color:var(--mut)}
+.node{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:.3rem .6rem;color:var(--fg);font-weight:600}
+footer{color:var(--mut);font-size:.85rem;margin-top:2rem;border-top:1px solid var(--line);padding-top:1rem}
+a{color:inherit}
+"""
+
+
+def _page(title: str, body: str) -> str:
+    return (f"<!doctype html><html><head><meta charset=utf-8>"
+            f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>{title}</title><style>{_CSS}</style></head>"
+            f"<body><div class=wrap>{body}</div></body></html>")
+
+
+def landing_html(state, started_at) -> str:
+    up = int(time.time() - started_at)
+    body = f"""
+<h1>Matrix &harr; Telegram relay</h1>
+<p class=sub>A small bridge that mirrors messages between one Matrix room and one Telegram group.</p>
+<div class=card>
+  <p class=pill><span class=dot></span>Running</p>
+  <dl><dt>Uptime</dt><dd>{up // 3600}h {(up % 3600) // 60}m</dd></dl>
+</div>
+<div class=card>
+  <p class=flow><span class=node>Matrix</span> &harr; <span class=node>relay</span> &harr; <span class=node>Telegram</span></p>
+  <p>Each message posted on one side is re-posted on the other, attributed to
+  its original sender. It relays plain text; images and files become a short
+  placeholder rather than being re-uploaded. Edits, deletions, replies and
+  reactions are not mirrored.</p>
+  <p>The Matrix side is end-to-end encrypted, so the relay holds its own device
+  keys and decrypts only in memory to forward. Messages are not stored: it keeps
+  a position marker per side so a restart resumes without duplicating.</p>
+</div>
+<div class=card>
+  <p><strong>Which room and group?</strong> Not shown here. This page is public,
+  so it deliberately omits the venues, the bot accounts, and how much traffic
+  has crossed.</p>
+  <p class=sub style="margin:0">Operators: <code>/detail.html?token=…</code></p>
+</div>
+<footer>One pairing per instance, fixed in configuration. No public endpoint can change it.</footer>
+"""
+    return _page("Matrix ↔ Telegram relay", body)
+
+
+UNAUTH_HTML = _page("Not authorized", """
+<h1>Not authorized</h1>
+<p class=sub>This view needs an operator token.</p>
+<div class=card><p>Append <code>?token=…</code> or send
+<code>Authorization: Bearer …</code>.</p></div>
+<p><a href="./">&larr; Back</a></p>
+""")
+
+
+def detail_html(d: dict) -> str:
+    ch = d["channels"][0]
+    ids = d["identities"]
+    r = d["relayed"]
+    up = d["uptime_s"]
+    body = f"""
+<h1>Relay detail</h1>
+<p class=sub>Operator view &mdash; contains venue and account identifiers.</p>
+<div class=card>
+  <p class=pill><span class=dot></span>Running</p>
+  <dl>
+    <dt>Uptime</dt><dd>{up // 3600}h {(up % 3600) // 60}m</dd>
+    <dt>First started</dt><dd>{_ago(d['first_start'])}</dd>
+    <dt>Last relay</dt><dd>{d['last_relay_ago']}</dd>
+  </dl>
+</div>
+<div class=card>
+  <h2 style="font-size:1rem;margin:0 0 .75rem">Channel maintained</h2>
+  <dl>
+    <dt>Matrix room</dt><dd><code>{html.escape(str(ch['matrix_room']))}</code></dd>
+    <dt>Telegram chat</dt><dd><code>{html.escape(str(ch['telegram_chat']))}</code></dd>
+    <dt>Direction</dt><dd>{ch['direction']}</dd>
+    <dt>Scope</dt><dd>{ch['scope']}</dd>
+  </dl>
+</div>
+<div class=card>
+  <h2 style="font-size:1rem;margin:0 0 .75rem">Messages relayed</h2>
+  <dl>
+    <dt>Telegram &rarr; Matrix</dt><dd>{r['telegram_to_matrix']}</dd>
+    <dt>Matrix &rarr; Telegram</dt><dd>{r['matrix_to_telegram']}</dd>
+    <dt>Total</dt><dd><strong>{r['total']}</strong></dd>
+  </dl>
+</div>
+<div class=card>
+  <h2 style="font-size:1rem;margin:0 0 .75rem">Identities &amp; cursors</h2>
+  <dl>
+    <dt>Matrix user</dt><dd><code>{html.escape(str(ids['matrix_user']))}</code></dd>
+    <dt>Matrix device</dt><dd><code>{html.escape(str(ids['matrix_device']))}</code></dd>
+    <dt>Telegram bot</dt><dd><code>{html.escape(str(ids['telegram_bot']))}</code></dd>
+    <dt>getUpdates offset</dt><dd><code>{d['cursors']['tg_offset']}</code></dd>
+    <dt>Matrix dedup ring</dt><dd>{d['cursors']['mx_seen']} event ids</dd>
+  </dl>
+</div>
+<p><a href="./">&larr; Public page</a></p>
+"""
+    return _page("Relay detail", body)
 
 
 async def run(args) -> int:
@@ -409,6 +600,8 @@ async def run(args) -> int:
     tg_chat_id = tg_load_chat_id()
     bot_mxid = creds["user_id"]
     state = State.load()
+    state.stats["restarts"] += 1
+    state.save()
 
     mx_client = await mx_make_client(creds, sync_cursor_path=RELAY_SYNC_CURSOR)
     tg_session = aiohttp.ClientSession()
@@ -514,32 +707,58 @@ async def run(args) -> int:
     if os.environ.get("HEALTH_PORT"):
         from aiohttp import web
 
-        async def _health(_req):
-            return web.json_response(
-                {
-                    "ok": True,
-                    "room": room,
-                    "tg_chat": tg_chat_id,
-                    "tg_bot": me["username"],
-                    # Which Matrix device this instance is using. Needed to tell
-                    # whether the LIVE device is the cross-signed one after a
-                    # re-mint — /keys/query alone can't say which is in use.
-                    "mx_user": bot_mxid,
-                    "mx_device": creds["device_id"],
-                    "tg_offset": state.tg_offset,
-                    "mx_seen": len(state.mx_seen),
-                    "uptime_s": int(time.time() - started_at),
-                }
-            )
+        # The pod's ingress serves this with NO authentication, so the split
+        # below is a security boundary, not decoration. Anything that names a
+        # venue, account, or device belongs behind the token.
+        status_token = os.environ.get("RELAY_STATUS_TOKEN", "")
+
+        def _authed(req) -> bool:
+            if not status_token:
+                return False  # no token configured => detail is unreachable
+            supplied = req.query.get("token", "")
+            auth = req.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                supplied = auth[7:]
+            return hmac.compare_digest(supplied, status_token)
+
+        async def _index(_req):
+            return web.Response(text=landing_html(state, started_at),
+                                content_type="text/html")
+
+        async def _health_json(_req):
+            # Deliberately non-identifying: liveness only.
+            return web.json_response(public_summary(state, started_at))
+
+        async def _detail(req):
+            if not _authed(req):
+                return web.json_response(
+                    {"error": "unauthorized",
+                     "hint": "GET /detail?token=… or Authorization: Bearer …"},
+                    status=401)
+            return web.json_response(detail_summary(
+                state, started_at, room, tg_chat_id, me, bot_mxid,
+                creds["device_id"]))
+
+        async def _detail_html(req):
+            if not _authed(req):
+                return web.Response(text=UNAUTH_HTML, status=401,
+                                    content_type="text/html")
+            return web.Response(
+                text=detail_html(detail_summary(
+                    state, started_at, room, tg_chat_id, me, bot_mxid,
+                    creds["device_id"])),
+                content_type="text/html")
 
         app = web.Application()
-        app.router.add_get("/health", _health)
-        app.router.add_get("/", _health)
+        app.router.add_get("/", _index)
+        app.router.add_get("/health", _health_json)
+        app.router.add_get("/detail", _detail)
+        app.router.add_get("/detail.html", _detail_html)
         health = web.AppRunner(app)
         await health.setup()
         port = int(os.environ["HEALTH_PORT"])
         await web.TCPSite(health, "0.0.0.0", port).start()
-        log("relay", f"health listening on :{port}")
+        log("relay", f"http listening on :{port} (detail {'gated' if status_token else 'DISABLED — no RELAY_STATUS_TOKEN'})")
 
     tasks = [asyncio.create_task(tg_loop()), asyncio.create_task(mx_loop())]
     try:

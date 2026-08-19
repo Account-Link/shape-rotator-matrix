@@ -70,6 +70,14 @@ MX_RK="${MATRIX_RECOVERY_KEY:-}"
 [ -z "$MX_RK" ] && [ -f "$MX_RK_FILE" ] && MX_RK="$(tr -d "[:space:]" <"$MX_RK_FILE")"
 [ -n "$MX_RK" ] || echo "deploy-pod: WARNING no recovery key -- device will show the unverified shield" >&2
 
+# Operator token for /detail. The pod ingress fronts this service with NO auth,
+# so "/" and "/health" must stay non-identifying and everything that names a
+# venue, account or device sits behind this token.
+RS_FILE="$HOME/.shape-bridge-bot/relay-status-token"
+RELAY_STATUS_TOKEN="${RELAY_STATUS_TOKEN:-}"
+[ -z "$RELAY_STATUS_TOKEN" ] && [ -f "$RS_FILE" ] && RELAY_STATUS_TOKEN="$(tr -d "[:space:]" <"$RS_FILE")"
+[ -n "$RELAY_STATUS_TOKEN" ] || echo "deploy-pod: WARNING no RELAY_STATUS_TOKEN -- /detail will be unreachable" >&2
+
 # --- fixtures: the ONLY venues this relay may touch --------------------------
 FIXTURES="$HOME/.teleport-travel/test-fixtures.json"
 [ -f "$FIXTURES" ] || die "missing fixtures $FIXTURES"
@@ -95,7 +103,7 @@ echo "deploy-pod: pinned $DIGEST"
 # --- deploy ------------------------------------------------------------------
 # The fixtures ride along as env so the container needs no bind mount; relay.py
 # still refuses to touch anything but this pair.
-payload="$(TG_TOKEN="$TG_TOKEN" MX_PW="$MX_PW" MX_RK="$MX_RK" python3 - "$DIGEST" "$NAME" "$ROOM" "$CHAT" "$MATRIX_USER" "$MATRIX_HS" <<'PY'
+payload="$(TG_TOKEN="$TG_TOKEN" MX_PW="$MX_PW" MX_RK="$MX_RK" RS_TOK="$RELAY_STATUS_TOKEN" python3 - "$DIGEST" "$NAME" "$ROOM" "$CHAT" "$MATRIX_USER" "$MATRIX_HS" <<'PY'
 import json, os, sys
 digest, name, room, chat, user, hs = sys.argv[1:7]
 print(json.dumps({
@@ -110,6 +118,7 @@ print(json.dumps({
         "MATRIX_BRIDGE_USER": user,
         "MATRIX_BRIDGE_PASSWORD": os.environ["MX_PW"],
         "MATRIX_RECOVERY_KEY": os.environ.get("MX_RK", ""),
+        "RELAY_STATUS_TOKEN": os.environ.get("RS_TOK", ""),
         "MATRIX_HOMESERVER": hs,
         "MATRIX_ROOM_ID": room,
         "TELEGRAM_CHAT_ID": str(chat),
