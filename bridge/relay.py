@@ -531,8 +531,12 @@ def detail_summary(state, started_at, room, tg_chat_ids, me, bot_mxid,
             "total": st["tg_to_mx"] + st["mx_to_tg"],
         },
         "cursors": {"tg_offset": state.tg_offset, "mx_seen": len(state.mx_seen)},
+        # Historical sightings are kept in state, but a chat that IS now
+        # bridged must not still be listed as "unconfigured" — that reads as a
+        # pending action item when there is nothing left to do.
         "unconfigured_chats_seen": sorted(
-            state.unconfigured.values(), key=lambda c: -c["last_seen"]),
+            (c for c in state.unconfigured.values() if c["id"] not in set(tg_chat_ids)),
+            key=lambda c: -c["last_seen"]),
         "first_start": st["first_start"],
         "last_relay": st["last_relay"],
         "last_relay_ago": _ago(st["last_relay"]),
