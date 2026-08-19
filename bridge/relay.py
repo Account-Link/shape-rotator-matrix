@@ -3,39 +3,46 @@
 
 Long-running loop that mirrors plain-text messages between the ONE Matrix room
 and the ONE Telegram group named in ~/.teleport-travel/test-fixtures.json.
-Built on bridge/mx.py (E2EE Matrix) and bridge/tg.py (Telethon) — both are
-expected to already be bootstrapped (`mx.py send` once, so `store/.woke`
-exists and Element has shared megolm keys to the device).
+Built on bridge/mx.py (E2EE Matrix) and bridge/tg.py (Telegram Bot API) — the
+Matrix device is expected to already be bootstrapped (`mx.py send` once, so
+`store/.woke` exists and Element has shared megolm keys to the device).
 
 Mirroring format (relay-bot style, no puppeting):
 
-    **<sender>:** <text>
+    <sender>: <text>       (sender bolded on each side's native markup)
 
 v1 scope (per #49): plain text only. Media is replaced with a placeholder;
 edits, deletes, threads, and reactions are ignored (not relayed).
 
-Loop prevention — each side ignores messages authored by the relay's OWN
-identity on that side:
+Loop prevention is asymmetric, because the two platforms differ:
 
-  - Telegram: messages whose sender is this Telethon account (`get_me`), and
-  - Matrix:   messages whose sender is the bridge bot mxid (from creds.json).
+  - Telegram: NONE NEEDED. The Bot API never delivers a bot its own messages
+    in a group, so what the relay posts cannot come back. Verified live
+    2026-08-19 (send, then poll: zero updates).
+  - Matrix:   messages whose sender is the bridge bot mxid (from creds.json)
+    are dropped, since Matrix does echo them back through /sync.
 
-A message the relay forwards lands on the far side under the relay's own
-identity, so the counter-poller sees it as "self" and drops it — no echo.
-Sender-id is the SOLE loop guard; content-prefix matching is intentionally
-NOT used (it is fragile against users literally named like the relay and
-against edited bodies).
+Content-prefix matching is intentionally NOT used on either side (it is
+fragile against users literally named like the relay, and against edited
+bodies).
 
 Durable cursors (~/.teleport-travel/relay-state.json) — restart-safe, no
 dupes, catch-up after downtime:
 
-  - tg_last_id:      highest Telegram message id already processed.
+  - tg_offset:       next getUpdates offset (one past the last CONFIRMED
+                     update_id). Sending it to Telegram is what acknowledges
+                     everything below it. Telegram retains unconfirmed updates
+                     for ~24h, which is the real bound on catch-up after
+                     downtime — longer outages lose the gap.
   - mx_seen:         bounded ring of recently-processed Matrix event_ids
                      (dedup safety net across re-syncs / cursor rewinds).
 
 plus the relay's OWN /sync cursor at
 ``~/.shape-bridge-bot/store/relay_next_batch``: absent on first start ->
-advance to "now" without relaying (skip backlog, same as tg_last_id).
+advance to "now" without relaying (skip backlog, same as tg_offset).
+
+Both cursors advance only AFTER the far side accepts the message (#71), so a
+delivery failure is retried rather than swallowed.
 
 The Matrix /sync cursor lives in its OWN file
 (``~/.shape-bridge-bot/store/relay_next_batch``), NOT mx.py's
@@ -72,9 +79,13 @@ from mx import (
 )
 from tg import (
     _sender_name as tg_sender_name,
+    get_updates as tg_get_updates,
     load_chat_id as tg_load_chat_id,
     make_client as tg_make_client,
+    relay_html as tg_relay_html,
+    send_message as tg_send_message,
 )
+import aiohttp
 from mautrix.types import (
     EncryptedEvent,
     Event,
@@ -95,10 +106,12 @@ RELAY_SYNC_CURSOR = Path(
 
 # /sync long-poll timeout (ms). The server holds the connection this long.
 MX_SYNC_TIMEOUT = 30_000
-# Telegram poll cadence (s). Matrix pushes via long-poll; TG has to be polled.
-TG_POLL_INTERVAL = 3.0
-# Bounds for one catch-up pass.
-TG_POLL_LIMIT = 200
+# Backoff (s) after a FAILED Telegram poll only. getUpdates long-polls, so the
+# success path re-polls immediately — a fixed cadence here would just add
+# latency to every bridged message.
+TG_ERROR_BACKOFF = 3.0
+# Bounds for one catch-up pass (getUpdates caps `limit` at 100).
+TG_POLL_LIMIT = 100
 # How many Matrix event_ids to remember for dedup.
 MX_SEEN_LIMIT = 500
 
@@ -110,7 +123,9 @@ _TG_MEDIA_PLACEHOLDER = {
     "sticker": "[sticker posted in Telegram]",
     "voice": "[voice message posted in Telegram]",
     "audio": "[audio posted in Telegram]",
-    "gif": "[gif posted in Telegram]",
+    # Bot API field name for a GIF is `animation`, not `gif`.
+    "animation": "[gif posted in Telegram]",
+    "video_note": "[video note posted in Telegram]",
 }
 
 
@@ -122,8 +137,11 @@ class State:
     """Durable relay cursors. Persisted atomically after every relay so a kill
     between messages cannot double-relay."""
 
-    def __init__(self, tg_last_id: int, mx_seen):
-        self.tg_last_id = tg_last_id
+    def __init__(self, tg_offset: int, mx_seen):
+        # Next getUpdates offset: one past the highest update_id confirmed.
+        # Sending it back to Telegram is what durably acknowledges everything
+        # below it, so this is the Telegram-side restart cursor.
+        self.tg_offset = tg_offset
         self.mx_seen = list(mx_seen)
 
     @classmethod
@@ -135,19 +153,19 @@ class State:
                 raise SystemExit(f"relay state {STATE_PATH} corrupt: {e}")
             try:
                 return cls(
-                    tg_last_id=int(data.get("tg_last_id", 0)),
+                    tg_offset=int(data.get("tg_offset", 0)),
                     mx_seen=list(data.get("mx_seen", [])),
                 )
             except (TypeError, ValueError) as e:
                 raise SystemExit(f"relay state {STATE_PATH} corrupt: {e}")
-        return cls(tg_last_id=0, mx_seen=[])
+        return cls(tg_offset=0, mx_seen=[])
 
     def save(self) -> None:
         """Atomic write (tmp + rename) — never a half-written file on crash."""
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
             {
-                "tg_last_id": self.tg_last_id,
+                "tg_offset": self.tg_offset,
                 "mx_seen": self.mx_seen[-MX_SEEN_LIMIT:],
             }
         )
@@ -167,18 +185,19 @@ class State:
         return False
 
 
-def _tg_text(msg) -> str | None:
-    """Body to relay for a Telegram message, or None to skip.
+def _tg_text(msg: dict) -> str | None:
+    """Body to relay for a Bot API message dict, or None to skip.
 
-    Plain text passes through; media becomes a placeholder; empty service
-    messages are skipped."""
-    if msg.text:
-        return msg.text
-    if msg.media:
-        for attr, label in _TG_MEDIA_PLACEHOLDER.items():
-            if getattr(msg.media, attr, None) is not None:
-                return label
-        return "[non-text message in Telegram]"
+    Plain text passes through; a caption carries the same intent so it is
+    relayed alongside the media placeholder; media without a caption becomes a
+    bare placeholder; empty service messages are skipped."""
+    text = msg.get("text")
+    if text:
+        return text
+    for key, label in _TG_MEDIA_PLACEHOLDER.items():
+        if msg.get(key) is not None:
+            caption = msg.get("caption")
+            return f"{label} {caption}" if caption else label
     return None
 
 
@@ -244,10 +263,12 @@ async def mx_send_relay(mx_client, room: str, sender: str, text: str) -> None:
 
 
 async def tg_send_relay(tg_client, tg_chat_id: int, sender: str, text: str) -> None:
-    """Send one relayed line into the Telegram group."""
-    body = f"**{sender}:** {text}"
-    await tg_client.send_message(tg_chat_id, body)
-    log("tg", f"-> {body!r}")
+    """Send one relayed line into the Telegram group.
+
+    HTML, not Markdown: the Bot API does not auto-parse (Telethon did), and a
+    body containing `_` or `*` would make Telegram reject a Markdown parse."""
+    await tg_send_message(tg_client, tg_chat_id, tg_relay_html(sender, text))
+    log("tg", f"-> {sender}: {text!r}")
 
 
 async def _mx_sync(mx_client, room: str, *, full_state: bool = False, timeout: int = MX_SYNC_TIMEOUT):
@@ -327,41 +348,45 @@ async def mx_relay_once(mx_client, room, bot_mxid, tg_client, tg_chat_id, state,
     state.save()
 
 
-async def tg_poll_once(tg_client, tg_chat_id, tg_me_id, mx_client, room, state):
-    """Poll once and relay every new non-self Telegram message in the group to
-    Matrix. Advances the cursor past every processed id (relayed or skipped)
-    so a stuck message can't block the queue."""
-    new = []
-    async for msg in tg_client.iter_messages(tg_chat_id, limit=TG_POLL_LIMIT):
-        if msg.id <= state.tg_last_id:
-            break
-        new.append(msg)
-    if not new:
+async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
+    """Long-poll getUpdates once and relay every new Telegram message to Matrix.
+
+    No loop guard is needed here: the Bot API never delivers a bot its own
+    messages in a group, so what the relay posts cannot come back (verified
+    live 2026-08-19). If Telegram ever changes that, the relayed line would
+    echo, so the sender id is logged rather than silently trusted.
+
+    Cursor discipline mirrors mx_relay_once (#71): tg_offset only advances PAST
+    a message once Matrix has accepted it. A failed Matrix send leaves the
+    offset behind, so Telegram redelivers the update on the next poll and the
+    message is retried — including across a restart."""
+    updates = await tg_get_updates(
+        tg_client, offset=state.tg_offset, chat_id=tg_chat_id, limit=TG_POLL_LIMIT
+    )
+    if not updates:
         return
-    # First-ever start: set the cursor to the newest id and skip the backlog
-    # (never dump history into the other side on a fresh deploy).
-    if state.tg_last_id == 0:
-        state.tg_last_id = new[0].id
+    # First-ever start: confirm the backlog without relaying it, so a fresh
+    # deploy never dumps Telegram history into the Matrix room.
+    if state.tg_offset == 0:
+        state.tg_offset = updates[-1][0] + 1
         state.save()
-        log("tg", f"first start: cursor set to {new[0].id}, backlog skipped")
+        log("tg", f"first start: offset set to {state.tg_offset}, backlog skipped")
         return
-    for msg in reversed(new):  # oldest -> newest
-        # Loop prevention: drop our own posts (the Telethon account's).
-        if msg.sender_id == tg_me_id:
-            log("tg", f"skip own echo id={msg.id}")
-            state.tg_last_id = max(state.tg_last_id, msg.id)
+    for update_id, msg in updates:  # getUpdates returns oldest -> newest
+        if msg is None:  # another chat, or a non-message update — step over it
+            state.tg_offset = max(state.tg_offset, update_id + 1)
             continue
         text = _tg_text(msg)
         if text is None:
-            state.tg_last_id = max(state.tg_last_id, msg.id)
+            state.tg_offset = max(state.tg_offset, update_id + 1)
             continue
-        sender = tg_sender_name(await msg.get_sender(), msg.sender_id)
+        sender = tg_sender_name(msg)
         try:
             await mx_send_relay(mx_client, room, sender, text)
         except Exception as exc:
-            log("mx", f"send failed for tg id={msg.id}: {type(exc).__name__}: {exc}")
-            continue  # leave cursor behind so the next pass retries
-        state.tg_last_id = max(state.tg_last_id, msg.id)
+            log("mx", f"send failed for tg update={update_id}: {type(exc).__name__}: {exc}")
+            break  # stop the pass; offset stays put so Telegram redelivers
+        state.tg_offset = max(state.tg_offset, update_id + 1)
         state.save()
     state.save()
 
@@ -373,26 +398,21 @@ async def run(args) -> int:
     state = State.load()
 
     mx_client = await mx_make_client(creds, sync_cursor_path=RELAY_SYNC_CURSOR)
-    tg_client = tg_make_client()
+    tg_session = aiohttp.ClientSession()
+    tg_client = tg_make_client(tg_session)
 
-    await tg_client.connect()
     try:
-        from telethon.errors import AuthKeyError
-
-        try:
-            authorized = await tg_client.is_user_authorized()
-        except AuthKeyError as e:
-            raise SystemExit(f"tg session auth key unusable ({e}); re-login is an operator action")
-        if not authorized:
-            raise SystemExit(
-                "tg session not authorized; re-login in place on the relay host "
-                "(single-host rule)"
-            )
-        me = await tg_client.get_me()
+        me = await tg_client.call("getMe")
     except BaseException:
-        await tg_client.disconnect()
+        await tg_session.close()
         raise
-    tg_me_id = me.id
+    if not me.get("can_read_all_group_messages"):
+        await tg_session.close()
+        raise SystemExit(
+            f"bot @{me.get('username')} has privacy mode ENABLED — it would only see "
+            "commands and replies, silently missing most group traffic. Disable it via "
+            "BotFather (/setprivacy -> Disable) or make the bot a group admin."
+        )
 
     # mx.py already bootstrapped the device once (cross-signed, wake posted).
     # share_keys is idempotent — a no-op once device keys are on the server.
@@ -400,7 +420,7 @@ async def run(args) -> int:
 
     log(
         "relay",
-        f"start room={room} tg_chat={tg_chat_id} bot={bot_mxid} tg_me={tg_me_id}",
+        f"start room={room} tg_chat={tg_chat_id} bot={bot_mxid} tg_bot=@{me['username']}",
     )
 
     # First-ever Matrix start: the relay keeps its OWN /sync cursor
@@ -415,13 +435,13 @@ async def run(args) -> int:
     if args.once:
         # One pass each side with a short MX window, then a clean exit.
         try:
-            await tg_poll_once(tg_client, tg_chat_id, tg_me_id, mx_client, room, state)
+            await tg_poll_once(tg_client, tg_chat_id, mx_client, room, state)
             await mx_relay_once(
                 mx_client, room, bot_mxid, tg_client, tg_chat_id, state, timeout=2000
             )
         finally:
             state.save()
-            await tg_client.disconnect()
+            await tg_session.close()
             await mx_shutdown(mx_client)
             log("relay", "--once complete")
         return 0
@@ -444,13 +464,15 @@ async def run(args) -> int:
     async def tg_loop():
         while not stop.is_set():
             try:
-                await tg_poll_once(
-                    tg_client, tg_chat_id, tg_me_id, mx_client, room, state
-                )
+                # getUpdates long-polls, so this blocks until traffic arrives or
+                # the poll window closes. Re-poll immediately on success; only
+                # back off after a failure.
+                await tg_poll_once(tg_client, tg_chat_id, mx_client, room, state)
+                continue
             except Exception as exc:
                 log("tg", f"poll error: {type(exc).__name__}: {exc}")
             try:
-                await asyncio.wait_for(stop.wait(), timeout=TG_POLL_INTERVAL)
+                await asyncio.wait_for(stop.wait(), timeout=TG_ERROR_BACKOFF)
             except asyncio.TimeoutError:
                 pass
 
@@ -476,7 +498,7 @@ async def run(args) -> int:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         state.save()
-        await tg_client.disconnect()
+        await tg_session.close()
         await mx_shutdown(mx_client)
         log("relay", "stopped cleanly")
     return 0

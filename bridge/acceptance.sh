@@ -72,10 +72,12 @@ SHAPE_BRIDGE_DIR_HOST="$HOST_HOME/.shape-bridge-bot"
 FIXTURES_PATH="$TELEPORT_DIR_HOST/test-fixtures.json"
 CREDS_PATH="$SHAPE_BRIDGE_DIR_HOST/creds.json"
 STATE_PATH="$TELEPORT_DIR_HOST/relay-state.json"
-TG_ENV_PATH="$TELEPORT_DIR_HOST/.env"   # symlink is followed on the host only
+TG_TOKEN_PATH="$SHAPE_BRIDGE_DIR_HOST/telegram-bot-token"  # Bot API: the ONLY TG credential
 
-RUNNER_IMAGE="shape-bridge-runner"      # tests/Dockerfile (libolm + mautrix)
-ACCEPT_IMAGE="shape-bridge-acceptance"  # runner + telethon + python-dotenv
+# One image now: the Bot API needs only aiohttp, which tests/Dockerfile already
+# ships. The old shape-bridge-acceptance layer (telethon + python-dotenv) is gone.
+RUNNER_IMAGE="shape-bridge-runner"      # tests/Dockerfile (libolm + mautrix + aiohttp)
+ACCEPT_IMAGE="$RUNNER_IMAGE"
 
 # Bounds. --once is a bounded pass (can't hang); these just catch a regression.
 RELAY_ONCE_TIMEOUT=60   # one relay --once pass (priming + each check step)
@@ -144,23 +146,19 @@ cleanup() {
 trap cleanup EXIT
 
 #-----------------------------------------------------------------------------
-# Resolve the Telegram API creds from the host-side .env (following the
-# symlink) and pass them through to the container as -e vars. This is the exact
-# gap that sank the previous attempt: inside the container the .env symlink
-# dangles, so tg.py saw "TELEGRAM_API_ID/HASH missing". We never rely on the
-# symlink resolving inside the container.
+# Resolve the Telegram bot token on the HOST and pass it through as an -e var.
+#
+# The Bot API needs one credential, not three: no api_id/api_hash, no session
+# file. That also retires the symlink hazard that sank the previous attempt —
+# ~/.teleport-travel/.env was a symlink into another project which dangled
+# inside the container. Nothing here depends on a symlink resolving in-container.
 #-----------------------------------------------------------------------------
 resolve_tg_creds() {
-  local real_env
-  real_env="$(readlink -f "$TG_ENV_PATH" 2>/dev/null || true)"
-  [ -n "$real_env" ] && [ -f "$real_env" ] || fail "TG .env not found at $TG_ENV_PATH"
-  set -a
-  # shellcheck disable=SC1090
-  eval "$(grep -E '^(TELEGRAM_API_ID|TELEGRAM_API_HASH)=' "$real_env" | sed 's/^/export /')"
-  set +a
-  TG_API_ID="${TELEGRAM_API_ID:-}"
-  TG_API_HASH="${TELEGRAM_API_HASH:-}"
-  [ -n "$TG_API_ID" ] && [ -n "$TG_API_HASH" ] || fail "TELEGRAM_API_ID/HASH missing in $real_env"
+  TG_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+  if [ -z "$TG_BOT_TOKEN" ] && [ -f "$TG_TOKEN_PATH" ]; then
+    TG_BOT_TOKEN="$(tr -d '[:space:]' <"$TG_TOKEN_PATH")"
+  fi
+  [ -n "$TG_BOT_TOKEN" ] || fail "no bot token: set TELEGRAM_BOT_TOKEN or provision $TG_TOKEN_PATH"
 }
 
 #-----------------------------------------------------------------------------
@@ -185,8 +183,7 @@ run_bridge() {
         --name "$(next_ctr_name)" \
         --user "$(id -u):$(id -g)" \
         -e "HOME=$CONTAINER_HOME" \
-        -e "TELEGRAM_API_ID=$TG_API_ID" \
-        -e "TELEGRAM_API_HASH=$TG_API_HASH" \
+        -e "TELEGRAM_BOT_TOKEN=$TG_BOT_TOKEN" \
         -v "$TELEPORT_DIR_HOST:$CONTAINER_HOME/.teleport-travel" \
         -v "$SHAPE_BRIDGE_DIR_HOST:$CONTAINER_HOME/.shape-bridge-bot" \
         -v "$REPO:/repo" \
@@ -244,18 +241,14 @@ python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$FIXTURES_PATH" \
 python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d.get("matrix_room_id","").startswith("!") and d.get("telegram_chat_id")' "$FIXTURES_PATH" \
   || fail "fixtures missing matrix_room_id / telegram_chat_id"
 resolve_tg_creds
-note "telegram api id: ${TG_API_ID}"
+note "telegram bot token: loaded (${#TG_BOT_TOKEN} chars, not printed)"
 
 section "build runner image (tests/Dockerfile: libolm + mautrix)"
 build_log="$(mktemp)"
 if ! docker build -t "$RUNNER_IMAGE" -f "$REPO/tests/Dockerfile" "$REPO/tests" >"$build_log" 2>&1; then
   tail -30 "$build_log" >&2; fail "runner image build failed (see above)"
 fi
-section "build acceptance image (runner + telethon + python-dotenv)"
-if ! docker build -t "$ACCEPT_IMAGE" -f "$REPO/bridge/acceptance.Dockerfile" "$REPO/bridge" >"$build_log" 2>&1; then
-  tail -30 "$build_log" >&2; fail "acceptance image build failed (see above)"
-fi
-pass "images built"
+pass "runner image built"
 
 #=============================================================================
 # Baseline: one --once pass to advance cursors to "now" (skip backlog on a
