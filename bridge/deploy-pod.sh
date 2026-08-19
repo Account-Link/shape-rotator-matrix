@@ -114,7 +114,22 @@ code="$(TG_TOKEN="$TG_TOKEN" MX_PW="$MX_PW" curl -s -o /tmp/deploy-pod-resp.json
   -d "$payload")"
 
 echo "deploy-pod: HTTP $code"
-head -c 600 /tmp/deploy-pod-resp.json; echo
+# The daemon echoes the manifest back INCLUDING env in plaintext. Printing the
+# raw body writes the bot token and Matrix password to the terminal and into any
+# transcript or CI log. Redact env before showing it.
+python3 - /tmp/deploy-pod-resp.json <<'RESP' 2>/dev/null || echo "  (unparseable response)"
+import json, sys
+d = json.load(open(sys.argv[1]))
+if isinstance(d, dict):
+    for k in ("name", "runtime", "mode", "oci_runtime", "image", "image_digest",
+              "deployed_at", "error", "detail"):
+        if k in d:
+            print("  %-13s %s" % (k, str(d[k])[:88]))
+    if d.get("env"):
+        print("  %-13s <%d vars, redacted>" % ("env", len(d["env"])))
+else:
+    print("  %s" % str(d)[:200])
+RESP
 [ "$code" = "200" ] || [ "$code" = "201" ] || die "deploy failed (HTTP $code)"
 
 echo "deploy-pod: health -> $CVM/$NAME/health"
