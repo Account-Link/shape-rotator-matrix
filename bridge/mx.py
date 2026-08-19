@@ -34,6 +34,7 @@ import os
 import stat
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from mautrix.api import HTTPAPI
@@ -77,10 +78,62 @@ class ConfigError(Exception):
     """Raised when operator-provisioned creds/fixtures are missing/invalid."""
 
 
+def bootstrap_creds_from_password():
+    """Mint creds.json by logging in with a password from the environment.
+
+    For container deployments (the dstack pod) where no creds.json can be
+    provisioned: the sealed env carries MATRIX_BRIDGE_USER + _PASSWORD, and the
+    bot logs in once to mint its OWN access_token and device_id, writing them
+    into the persistent volume. Subsequent boots find creds.json and skip this.
+
+    This deliberately mints a NEW device. That is safe only because the bridge
+    room is created fresh alongside it — a new device cannot decrypt megolm
+    history that predates it, so pointing this at a room with history you care
+    about would lose that history. Same reason mx.py never regenerates
+    crypto.db under an existing device_id.
+
+    Mirrors knock-approver/approver.py's `_login_with_password`."""
+    user = os.environ.get("MATRIX_BRIDGE_USER")
+    password = os.environ.get("MATRIX_BRIDGE_PASSWORD")
+    hs = os.environ.get("MATRIX_HOMESERVER")
+    if not (user and password and hs):
+        return None
+    body = {
+        "type": "m.login.password",
+        "identifier": {"type": "m.id.user", "user": user},
+        "password": password,
+        "initial_device_display_name": "shape-bridge relay (pod)",
+    }
+    req = urllib.request.Request(
+        f"{hs}/_matrix/client/v3/login",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        res = json.load(r)
+    creds = {
+        "user_id": res["user_id"],
+        "access_token": res["access_token"],
+        "device_id": res["device_id"],
+        "homeserver": hs,
+    }
+    CREDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CREDS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(creds, indent=2))
+    tmp.chmod(0o600)
+    os.replace(tmp, CREDS_PATH)
+    print(f"minted creds for {creds['user_id']} device={creds['device_id']}", flush=True)
+    return creds
+
+
 def load_config():
     """Return (creds_dict, matrix_room_id) from the operator-provisioned paths."""
-    if not CREDS_PATH.exists():
-        raise ConfigError(f"missing bot credentials: {CREDS_PATH}")
+    if not CREDS_PATH.exists() and bootstrap_creds_from_password() is None:
+        raise ConfigError(
+            f"missing bot credentials: {CREDS_PATH} (and no MATRIX_BRIDGE_USER/"
+            "_PASSWORD/MATRIX_HOMESERVER in the environment to mint them)"
+        )
     if not FIXTURES_PATH.exists():
         raise ConfigError(f"missing test fixtures: {FIXTURES_PATH}")
     creds = json.loads(CREDS_PATH.read_text())

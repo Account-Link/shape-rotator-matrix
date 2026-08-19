@@ -60,6 +60,7 @@ Usage:
 """
 import argparse
 import asyncio
+import html
 import json
 import os
 import signal
@@ -90,6 +91,7 @@ from mautrix.types import (
     EncryptedEvent,
     Event,
     EventType,
+    Format,
     MessageType,
     TextMessageEventContent,
     UserID,
@@ -252,14 +254,23 @@ def _try_deserialize(raw):
 
 
 async def mx_send_relay(mx_client, room: str, sender: str, text: str) -> None:
-    """Encrypt + send one relayed line into the Matrix room."""
-    body = f"**{sender}:** {text}"
+    """Encrypt + send one relayed line into the Matrix room.
+
+    `body` carries the markdown source and `formatted_body` the HTML, because
+    Matrix clients render only the latter — a body-only `**sender:**` shows up
+    in Element as literal asterisks, the same way the Bot API shipped literal
+    asterisks before parse_mode was set."""
     await mx_client.send_message_event(
         room,
         EventType.ROOM_MESSAGE,
-        TextMessageEventContent(msgtype=MessageType.TEXT, body=body),
+        TextMessageEventContent(
+            msgtype=MessageType.TEXT,
+            body=f"**{sender}:** {text}",
+            format=Format.HTML,
+            formatted_body=f"<b>{html.escape(sender)}:</b> {html.escape(text)}",
+        ),
     )
-    log("mx", f"-> {body!r}")
+    log("mx", f"-> {sender}: {text!r}")
 
 
 async def tg_send_relay(tg_client, tg_chat_id: int, sender: str, text: str) -> None:
@@ -392,6 +403,7 @@ async def tg_poll_once(tg_client, tg_chat_id, mx_client, room, state):
 
 
 async def run(args) -> int:
+    started_at = time.time()
     creds, room = mx_load_config()
     tg_chat_id = tg_load_chat_id()
     bot_mxid = creds["user_id"]
@@ -490,6 +502,35 @@ async def run(args) -> int:
                 except asyncio.TimeoutError:
                     pass
 
+    # The pod's ingress proxies path-based at /<name>/ and expects a listener,
+    # so expose the relay's cursors rather than a bare 200 — a stuck cursor is
+    # exactly what "the bridge looks up but isn't moving" looks like.
+    health = None
+    if os.environ.get("HEALTH_PORT"):
+        from aiohttp import web
+
+        async def _health(_req):
+            return web.json_response(
+                {
+                    "ok": True,
+                    "room": room,
+                    "tg_chat": tg_chat_id,
+                    "tg_bot": me["username"],
+                    "tg_offset": state.tg_offset,
+                    "mx_seen": len(state.mx_seen),
+                    "uptime_s": int(time.time() - started_at),
+                }
+            )
+
+        app = web.Application()
+        app.router.add_get("/health", _health)
+        app.router.add_get("/", _health)
+        health = web.AppRunner(app)
+        await health.setup()
+        port = int(os.environ["HEALTH_PORT"])
+        await web.TCPSite(health, "0.0.0.0", port).start()
+        log("relay", f"health listening on :{port}")
+
     tasks = [asyncio.create_task(tg_loop()), asyncio.create_task(mx_loop())]
     try:
         await stop.wait()
@@ -497,6 +538,8 @@ async def run(args) -> int:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if health is not None:
+            await health.cleanup()
         state.save()
         await tg_session.close()
         await mx_shutdown(mx_client)
