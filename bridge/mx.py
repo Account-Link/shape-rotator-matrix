@@ -329,18 +329,31 @@ async def _verify_this_device(olm) -> bool:
 
 
 async def ensure_ready(client, room):
-    """Bootstrap + initial sync + (first run only) one outgoing wake message.
+    """Bootstrap + initial sync, and a wake message only if one is needed.
 
-    The wake message is what makes other clients share megolm session keys to
-    this device — without it the bot syncs fine but decrypts nothing.
-    Guarded by a marker file so it fires exactly once per device."""
+    Element withholds megolm keys from an untrusted new device until it speaks
+    in the room, so an un-cross-signed device must post once or it syncs fine
+    and decrypts nothing. A CROSS-SIGNED device is trusted without speaking, so
+    the wake is skipped — it is a visible line in a human's room, not a
+    free-standing diagnostic, and posting it unnecessarily is just litter.
+    Marker-guarded either way, so at most one per device."""
     just_bootstrapped = await bootstrap(client)
     await sync_once(client, full_state=True, timeout=5000)
-    if just_bootstrapped or not WOKE_MARKER.exists():
+    # A cross-signed device does NOT need to speak first: MATRIX_ONBOARDING.md
+    # "Cross-signing with the recovery-key path lets Element trust-without-speak."
+    # The wake message is a visible line in a human's room, so send it only when
+    # it is actually load-bearing — i.e. this device could not be cross-signed.
+    if VERIFIED_MARKER.exists() or just_bootstrapped:
+        WOKE_MARKER.write_text(str(int(time.time())))
+        return
+    if not WOKE_MARKER.exists():
         await client.send_message_event(
             room,
             EventType.ROOM_MESSAGE,
-            TextMessageEventContent(msgtype=MessageType.TEXT, body=WAKE_TEXT),
+            # NOTICE, not TEXT: clients de-emphasise notices and bots are
+            # expected to use them, so the fallback path is as quiet as it can
+            # be while still being a real message.
+            TextMessageEventContent(msgtype=MessageType.NOTICE, body=WAKE_TEXT),
         )
         WOKE_MARKER.write_text(str(int(time.time())))
         # Drain the wake's to-device fanout (room key shares back to us) so the
