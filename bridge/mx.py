@@ -131,6 +131,17 @@ def bootstrap_creds_from_password():
     return creds
 
 
+def assert_test_venue():
+    """Same rule as tg.py: only a declared test venue may be driven by a send CLI."""
+    if not FIXTURES_PATH.exists():
+        raise ConfigError(f"missing test fixtures: {FIXTURES_PATH}")
+    fixtures = json.loads(FIXTURES_PATH.read_text())
+    if fixtures.get("test_venue") is not True:
+        raise ConfigError(
+            f"{FIXTURES_PATH} is a production pairing, not a test venue "
+            '(needs \'"test_venue": true\'). Point TEST_FIXTURES_PATH at one.'
+        )
+
 def load_config():
     """Return (creds_dict, matrix_room_id) from the operator-provisioned paths."""
     if not CREDS_PATH.exists() and bootstrap_creds_from_password() is None:
@@ -459,6 +470,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
+        if args.cmd == "send":
+            assert_test_venue()
         creds, room = load_config()
     except ConfigError as exc:
         print(f"mx.py: config error: {exc}", file=sys.stderr)

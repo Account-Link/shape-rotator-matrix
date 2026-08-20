@@ -228,6 +228,43 @@ note "state:       $STATE_PATH"
 note "full log:    $FULL_LOG  (mautrix stderr captured here; shown on failure)"
 
 command -v docker >/dev/null || fail "docker not on PATH"
+
+# --- venue gate --------------------------------------------------------------
+# This gate INJECTS "please ignore" traffic into whatever it is pointed at. The
+# fixtures file used to be both the test whitelist and the production pairing;
+# on 2026-08-20 an acceptance drive therefore posted into real groups. A venue
+# is only drivable if it says so, and only if it shares nothing with production.
+[ -f "$FIXTURES_PATH" ] || fail "missing fixtures $FIXTURES_PATH"
+python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$FIXTURES_PATH" \
+  || fail "fixtures not valid JSON"
+python3 - "$FIXTURES_PATH" <<'FIX' || fail "fixtures are not a usable test venue (see above)"
+import json, sys
+d = json.load(open(sys.argv[1]))
+if not d.get("matrix_room_id", "").startswith("!"):
+    raise SystemExit("fixtures missing matrix_room_id")
+if not (d.get("telegram_chat_ids") or ([d["telegram_chat_id"]] if "telegram_chat_id" in d else [])):
+    raise SystemExit("fixtures missing telegram_chat_ids")
+if d.get("test_venue") is not True:
+    raise SystemExit(
+        sys.argv[1] + " is a PRODUCTION pairing, not a test venue.\n"
+        "  Point TEST_FIXTURES_PATH at a fixtures file whose test_venue key is true,\n"
+        "  and whose room and chats contain nobody but the bot.")
+FIX
+
+PROD_FIXTURES="${PROD_FIXTURES_PATH:-$TELEPORT_DIR_HOST/test-fixtures.json}"
+if [ -f "$PROD_FIXTURES" ] && [ "$(readlink -f "$PROD_FIXTURES")" != "$(readlink -f "$FIXTURES_PATH")" ]; then
+  python3 - "$FIXTURES_PATH" "$PROD_FIXTURES" <<'OVL' || fail "test venue overlaps the production pairing"
+import json, sys
+def venues(path):
+    d = json.load(open(path))
+    ids = d.get("telegram_chat_ids") or ([d["telegram_chat_id"]] if "telegram_chat_id" in d else [])
+    return {str(d.get("matrix_room_id"))} | {str(i) for i in ids}
+shared = venues(sys.argv[1]) & venues(sys.argv[2])
+if shared:
+    raise SystemExit("test venue shares " + repr(sorted(shared)) + " with production pairing " + sys.argv[2])
+OVL
+fi
+# --- end venue gate ----------------------------------------------------------
 [ -f "$FIXTURES_PATH" ] || fail "missing fixtures $FIXTURES_PATH"
 [ -f "$CREDS_PATH" ]    || fail "missing bot creds $CREDS_PATH"
 [ -f "$STATE_PATH" ]    || fail "missing relay state $STATE_PATH (run relay.py --once once first)"
@@ -238,8 +275,6 @@ command -v docker >/dev/null || fail "docker not on PATH"
 [ -w "$SHAPE_BRIDGE_DIR_HOST/store" ] || fail "bot store dir not writable by $(id -un)"
 python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$FIXTURES_PATH" \
   || fail "fixtures not valid JSON"
-python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d.get("matrix_room_id","").startswith("!") and d.get("telegram_chat_id")' "$FIXTURES_PATH" \
-  || fail "fixtures missing matrix_room_id / telegram_chat_id"
 resolve_tg_creds
 note "telegram bot token: loaded (${#TG_BOT_TOKEN} chars, not printed)"
 

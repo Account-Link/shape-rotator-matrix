@@ -205,6 +205,19 @@ def relay_html(sender: str, text: str) -> str:
     return f"<b>{html.escape(sender)}:</b> {html.escape(text)}"
 
 
+def assert_test_venue() -> None:
+    """A send CLI may only ever inject into a venue that declares itself a test venue.
+
+    relay.py bridges the production pairing; these CLIs exist to drive acceptance.
+    Both read the same fixtures file, so on 2026-08-20 an acceptance drive posted
+    "please ignore" traffic into real groups. `test_venue: true` is the separation."""
+    fixtures = json.loads(FIXTURES_PATH.read_text())
+    if fixtures.get("test_venue") is not True:
+        raise SystemExit(
+            f"refusing to send: {FIXTURES_PATH} is a production pairing, not a test venue.\n"
+            '  A test venue must carry \'"test_venue": true\'. Point TEST_FIXTURES_PATH at one.'
+        )
+
 async def _run(action):
     """CLI helpers act on the FIRST configured chat; the relay uses them all."""
     async with aiohttp.ClientSession() as session:
@@ -212,6 +225,8 @@ async def _run(action):
 
 
 async def send(text: str) -> None:
+    assert_test_venue()
+
     async def _do(client, chat_id):
         mid = await send_message(client, chat_id, html.escape(text))
         print(f"sent id={mid} chat={chat_id}")
