@@ -157,7 +157,14 @@ Upstream `gateway/platforms/matrix.py` answers in cleartext rooms. The patch wra
 
 ## Element client behavior
 
-- Element withholds Megolm keys from a new bot device **until the bot speaks first** in the room. After enabling `MATRIX_ENCRYPTION=true`, send a wake message from the bot. Cross-signing with the recovery-key path lets Element trust-without-speak.
+- Element withholds Megolm keys from a new bot device **until the bot speaks first** in the room. After enabling `MATRIX_ENCRYPTION=true`, send a wake message from the bot. Cross-signing with the recovery-key path lets Element trust-without-speak — so when the device *is* cross-signed, skip the wake rather than posting it anyway. It is a visible line in a room humans read, not a free-standing diagnostic.
+
+- **⚠️ Device churn leaves permanent debris. Never point an ephemeral bot instance at a room humans read.** Learned the hard way 2026-08-19 (bridge relay). Any bot that mints a device when its store is missing — a container on a fresh volume, a self-heal `/login` — creates a *new* device per run. Each new device posts its own wake message, and when that run's store is discarded the device is orphaned. Its messages become **permanently undecryptable for everyone**: Element shows a red shield on them forever, and no key-sharing fixes it, because the only device that ever held those Megolm keys is gone. Redaction can't clean it up either — an E2EE room's `/messages` returns opaque `m.room.encrypted` events, so you cannot tell the bot's boilerplate from real traffic without decrypting first.
+
+  Design consequences:
+  - Keep a **dedicated test pairing** (its own room, its own Telegram chat) separate from any venue people actually use, and never repoint production fixtures at a live room "just for now". The isolation only helps if it survives the moment you are in a hurry.
+  - Treat "mint a device" as a **destructive** operation, not a convenience. Persist the crypto store on a named volume, and reuse `device_id` on re-login.
+  - Prune orphaned devices with `POST /_matrix/client/v3/delete_devices` (UIA: the first call 401s with a `session`, repeat it with `m.login.password`). That removes the device but **not** the undecryptable messages it already sent.
 
 ---
 

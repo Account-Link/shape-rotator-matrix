@@ -34,6 +34,7 @@ import os
 import stat
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from mautrix.api import HTTPAPI
@@ -62,6 +63,10 @@ CRYPTO_DB = STORE_DIR / "crypto.db"
 SYNC_CURSOR = STORE_DIR / "next_batch"
 RECOVERY_PATH = STORE_DIR / "recovery_key.txt"
 WOKE_MARKER = STORE_DIR / ".woke"
+# Set once this device has been signed by the account's existing cross-signing
+# key. Separate from .woke: waking is about megolm shares, this is about the
+# trust shield.
+VERIFIED_MARKER = STORE_DIR / ".verified"
 FIXTURES_PATH = Path(
     os.environ.get(
         "MX_FIXTURES", str(Path.home() / ".teleport-travel/test-fixtures.json")
@@ -77,10 +82,73 @@ class ConfigError(Exception):
     """Raised when operator-provisioned creds/fixtures are missing/invalid."""
 
 
+def bootstrap_creds_from_password():
+    """Mint creds.json by logging in with a password from the environment.
+
+    For container deployments (the dstack pod) where no creds.json can be
+    provisioned: the sealed env carries MATRIX_BRIDGE_USER + _PASSWORD, and the
+    bot logs in once to mint its OWN access_token and device_id, writing them
+    into the persistent volume. Subsequent boots find creds.json and skip this.
+
+    This deliberately mints a NEW device. That is safe only because the bridge
+    room is created fresh alongside it — a new device cannot decrypt megolm
+    history that predates it, so pointing this at a room with history you care
+    about would lose that history. Same reason mx.py never regenerates
+    crypto.db under an existing device_id.
+
+    Mirrors knock-approver/approver.py's `_login_with_password`."""
+    user = os.environ.get("MATRIX_BRIDGE_USER")
+    password = os.environ.get("MATRIX_BRIDGE_PASSWORD")
+    hs = os.environ.get("MATRIX_HOMESERVER")
+    if not (user and password and hs):
+        return None
+    body = {
+        "type": "m.login.password",
+        "identifier": {"type": "m.id.user", "user": user},
+        "password": password,
+        "initial_device_display_name": "shape-bridge relay (pod)",
+    }
+    req = urllib.request.Request(
+        f"{hs}/_matrix/client/v3/login",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        res = json.load(r)
+    creds = {
+        "user_id": res["user_id"],
+        "access_token": res["access_token"],
+        "device_id": res["device_id"],
+        "homeserver": hs,
+    }
+    CREDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CREDS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(creds, indent=2))
+    tmp.chmod(0o600)
+    os.replace(tmp, CREDS_PATH)
+    print(f"minted creds for {creds['user_id']} device={creds['device_id']}", flush=True)
+    return creds
+
+
+def assert_test_venue():
+    """Same rule as tg.py: only a declared test venue may be driven by a send CLI."""
+    if not FIXTURES_PATH.exists():
+        raise ConfigError(f"missing test fixtures: {FIXTURES_PATH}")
+    fixtures = json.loads(FIXTURES_PATH.read_text())
+    if fixtures.get("test_venue") is not True:
+        raise ConfigError(
+            f"{FIXTURES_PATH} is a production pairing, not a test venue "
+            '(needs \'"test_venue": true\'). Point TEST_FIXTURES_PATH at one.'
+        )
+
 def load_config():
     """Return (creds_dict, matrix_room_id) from the operator-provisioned paths."""
-    if not CREDS_PATH.exists():
-        raise ConfigError(f"missing bot credentials: {CREDS_PATH}")
+    if not CREDS_PATH.exists() and bootstrap_creds_from_password() is None:
+        raise ConfigError(
+            f"missing bot credentials: {CREDS_PATH} (and no MATRIX_BRIDGE_USER/"
+            "_PASSWORD/MATRIX_HOMESERVER in the environment to mint them)"
+        )
     if not FIXTURES_PATH.exists():
         raise ConfigError(f"missing test fixtures: {FIXTURES_PATH}")
     creds = json.loads(CREDS_PATH.read_text())
@@ -228,6 +296,16 @@ async def bootstrap(client):
     # Upload our olm identity + one-time keys if the server has none yet.
     await olm.share_keys()
     if await olm.get_own_cross_signing_public_keys() is not None:
+        # The ACCOUNT is already cross-signed, but THIS device may not be —
+        # which is the case for any re-minted device (see
+        # bootstrap_creds_from_password). generate_recovery_key() would be a
+        # no-op here, so the new device stays unsigned and Element shows
+        # "Encrypted by a device not verified by its owner" forever.
+        # verify_with_recovery_key() unlocks SSSS with the account's existing
+        # recovery key and signs this device with the existing SSK.
+        # MATRIX_ONBOARDING.md: "recovery-key path on next start with
+        # MATRIX_RECOVERY_KEY set will recover."
+        await _verify_this_device(olm)
         return False
     recovery_key = await olm.generate_recovery_key()
     RECOVERY_PATH.write_text(recovery_key + "\n")
@@ -235,19 +313,58 @@ async def bootstrap(client):
     return True
 
 
-async def ensure_ready(client, room):
-    """Bootstrap + initial sync + (first run only) one outgoing wake message.
+async def _verify_this_device(olm) -> bool:
+    """Self-verify this device against the account's existing cross-signing.
 
-    The wake message is what makes other clients share megolm session keys to
-    this device — without it the bot syncs fine but decrypts nothing.
-    Guarded by a marker file so it fires exactly once per device."""
+    No-op once the marker exists, so it runs once per device rather than every
+    start. Absent a recovery key we say so loudly rather than leaving the
+    operator to discover the yellow shield in Element."""
+    if VERIFIED_MARKER.exists():
+        return False
+    recovery_key = os.environ.get("MATRIX_RECOVERY_KEY") or (
+        RECOVERY_PATH.read_text().strip() if RECOVERY_PATH.exists() else ""
+    )
+    if not recovery_key:
+        print(
+            "WARNING: account is cross-signed but this device is not, and no "
+            "MATRIX_RECOVERY_KEY (or store/recovery_key.txt) is available to "
+            "sign it. Element will show 'Encrypted by a device not verified by "
+            "its owner' for every message this device sends.",
+            file=sys.stderr, flush=True,
+        )
+        return False
+    await olm.verify_with_recovery_key(recovery_key)
+    VERIFIED_MARKER.write_text(str(int(time.time())))
+    print("cross-signed this device via recovery key", flush=True)
+    return True
+
+
+async def ensure_ready(client, room):
+    """Bootstrap + initial sync, and a wake message only if one is needed.
+
+    Element withholds megolm keys from an untrusted new device until it speaks
+    in the room, so an un-cross-signed device must post once or it syncs fine
+    and decrypts nothing. A CROSS-SIGNED device is trusted without speaking, so
+    the wake is skipped — it is a visible line in a human's room, not a
+    free-standing diagnostic, and posting it unnecessarily is just litter.
+    Marker-guarded either way, so at most one per device."""
     just_bootstrapped = await bootstrap(client)
     await sync_once(client, full_state=True, timeout=5000)
-    if just_bootstrapped or not WOKE_MARKER.exists():
+    # A cross-signed device does NOT need to speak first: MATRIX_ONBOARDING.md
+    # "Cross-signing with the recovery-key path lets Element trust-without-speak."
+    # The wake message is a visible line in a human's room, so send it only when
+    # it is actually load-bearing — i.e. this device could not be cross-signed.
+    if VERIFIED_MARKER.exists() or just_bootstrapped:
+        WOKE_MARKER.write_text(str(int(time.time())))
+        return
+    if not WOKE_MARKER.exists():
         await client.send_message_event(
             room,
             EventType.ROOM_MESSAGE,
-            TextMessageEventContent(msgtype=MessageType.TEXT, body=WAKE_TEXT),
+            # NOTICE, not TEXT: clients de-emphasise notices and bots are
+            # expected to use them, so the fallback path is as quiet as it can
+            # be while still being a real message.
+            TextMessageEventContent(msgtype=MessageType.NOTICE, body=WAKE_TEXT),
         )
         WOKE_MARKER.write_text(str(int(time.time())))
         # Drain the wake's to-device fanout (room key shares back to us) so the
@@ -353,6 +470,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
+        if args.cmd == "send":
+            assert_test_venue()
         creds, room = load_config()
     except ConfigError as exc:
         print(f"mx.py: config error: {exc}", file=sys.stderr)
