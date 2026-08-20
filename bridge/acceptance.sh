@@ -69,7 +69,10 @@ HOST_HOME="${HOME:-/home/amiller}"
 CONTAINER_HOME="/home/amiller"   # fixed mount target so Path.home() resolves inside
 TELEPORT_DIR_HOST="$HOST_HOME/.teleport-travel"
 SHAPE_BRIDGE_DIR_HOST="$HOST_HOME/.shape-bridge-bot"
-FIXTURES_PATH="$TELEPORT_DIR_HOST/test-fixtures.json"
+# The venue this run drives. Defaults to the production pairing, which the venue
+# gate below then refuses -- driving anything real has to be a deliberate act.
+FIXTURES_PATH="${TEST_FIXTURES_PATH:-$TELEPORT_DIR_HOST/test-fixtures.json}"
+CONTAINER_FIXTURES="$CONTAINER_HOME/.teleport-travel/$(basename "$FIXTURES_PATH")"
 CREDS_PATH="$SHAPE_BRIDGE_DIR_HOST/creds.json"
 STATE_PATH="$TELEPORT_DIR_HOST/relay-state.json"
 TG_TOKEN_PATH="$SHAPE_BRIDGE_DIR_HOST/telegram-bot-token"  # Bot API: the ONLY TG credential
@@ -184,6 +187,7 @@ run_bridge() {
         --user "$(id -u):$(id -g)" \
         -e "HOME=$CONTAINER_HOME" \
         -e "TELEGRAM_BOT_TOKEN=$TG_BOT_TOKEN" \
+        -e "TEST_FIXTURES_PATH=$CONTAINER_FIXTURES" \
         -v "$TELEPORT_DIR_HOST:$CONTAINER_HOME/.teleport-travel" \
         -v "$SHAPE_BRIDGE_DIR_HOST:$CONTAINER_HOME/.shape-bridge-bot" \
         -v "$REPO:/repo" \
@@ -228,6 +232,8 @@ note "state:       $STATE_PATH"
 note "full log:    $FULL_LOG  (mautrix stderr captured here; shown on failure)"
 
 command -v docker >/dev/null || fail "docker not on PATH"
+[ "$(dirname "$(readlink -f "$FIXTURES_PATH")")" = "$(readlink -f "$TELEPORT_DIR_HOST")" ] \
+  || fail "venue $FIXTURES_PATH must live in $TELEPORT_DIR_HOST (that is the dir mounted into the runner)"
 
 # --- venue gate --------------------------------------------------------------
 # This gate INJECTS "please ignore" traffic into whatever it is pointed at. The
